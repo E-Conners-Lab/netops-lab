@@ -742,7 +742,7 @@ function NetworkRoom({
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     mount.appendChild(renderer.domElement);
 
     const floorMat = new THREE.MeshStandardMaterial({ color: 0x303433, roughness: 0.78, metalness: 0.08 });
