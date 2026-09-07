@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { initialState, runCommand, routeHealth, promptFor, commandHelp, completeCommand, configurationDiff } from '../app/network-simulator.ts';
+import { initialState, runCommand, routeHealth, promptFor, commandHelp, completeCommand, configurationDiff, topologyLinks } from '../app/network-simulator.ts';
 
 function consoleFor(device, state = structuredClone(initialState)) {
   let mode = 'exec';
@@ -146,4 +146,34 @@ test('running diff includes mistakes and clears after restoring the original con
   assert.match(configurationDiff(cli.state), /\+ shutdown/);
   cli.send('sw acc vlan 10'); cli.send('no shut');
   assert.equal(configurationDiff(cli.state), '# No configuration changes');
+});
+
+test('topology separates the access fault from the missing return route', () => {
+  assert.deepEqual(topologyLinks(initialState).map((link) => [link.id, link.status]), [['access','blocked'], ['uplink','up'], ['wan','up'], ['server','up']]);
+  const cli = consoleFor('br-sw1'); cli.send('conf t'); cli.send('int fa0/3'); cli.send('sw acc vl 20');
+  assert.ok(topologyLinks(cli.state).every((link) => link.status === 'up'));
+  assert.equal(routeHealth(cli.state).hqReturnRoute, false);
+  assert.equal(routeHealth(cli.state).endToEnd, false);
+});
+
+test('each interface shutdown marks the correct physical topology link', () => {
+  for (const [iface, expected] of [
+    ['br-sw1:FastEthernet0/3', 'access'],
+    ['br-sw1:FastEthernet0/1', 'uplink'],
+    ['br-r1:GigabitEthernet0/1', 'uplink'],
+    ['br-r1:GigabitEthernet0/0', 'wan'],
+    ['hq-r1:GigabitEthernet0/0', 'wan'],
+    ['hq-r1:GigabitEthernet0/1', 'server'],
+  ]) {
+    const links = topologyLinks({ ...initialState, shutdownInterfaces: [iface] });
+    assert.deepEqual(links.filter((link) => link.status === 'down').map((link) => link.id), [expected], iface);
+  }
+});
+
+test('a lost OSPF adjacency is distinct from a shut WAN link', () => {
+  const links = topologyLinks({ ...initialState, brOspfNetworks: [] });
+  const wan = links.find((link) => link.id === 'wan');
+  assert.equal(wan.status, 'blocked');
+  assert.equal(wan.detail, 'Link up; no OSPF adjacency');
+  assert.equal(links.find((link) => link.id === 'server').status, 'up');
 });

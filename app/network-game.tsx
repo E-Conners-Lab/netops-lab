@@ -1,6 +1,6 @@
 'use client';
 
-import type { Dispatch, ReactNode, SetStateAction } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -8,6 +8,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { createNetworkRoom } from './room-scene';
+import { TopologyView } from './topology-view';
 import {
   ArrowDown,
   ArrowLeft,
@@ -23,7 +24,6 @@ import {
   Crosshair,
   Eye,
   Keyboard,
-  Map,
   Network,
   Play,
   RotateCcw,
@@ -358,129 +358,6 @@ function NetworkRoom({
   );
 }
 
-function TopologyView({ state }: { state: SimState }) {
-  const health = routeHealth(state);
-  const links = [
-    {
-      from: [14, 74],
-      to: [34, 42],
-      ok: health.gatewayReachable,
-      label: 'Fa0/3 VLAN 20',
-    },
-    {
-      from: [34, 42],
-      to: [54, 42],
-      ok: health.gatewayReachable,
-      label: 'Branch LAN',
-    },
-    {
-      from: [54, 42],
-      to: [76, 42],
-      ok: health.ospfNeighborFull,
-      label: 'OSPF WAN',
-    },
-    {
-      from: [76, 42],
-      to: [90, 74],
-      ok: health.hqReturnRoute,
-      label: 'Return route',
-    },
-  ];
-
-  return (
-    <div className="topology-panel">
-      <div className="panel-heading">
-        <Map aria-hidden="true" />
-        <div>
-          <h2>Live Topology</h2>
-          <p>Routes and links reflect the simulated device state.</p>
-        </div>
-      </div>
-
-      <div className="topology-map" aria-label="Branch to HQ topology">
-        {links.map((link) => (
-          <div
-            key={link.label}
-            className={`topology-link ${link.ok ? 'link-ok' : 'link-bad'}`}
-            style={{
-              left: `${Math.min(link.from[0], link.to[0])}%`,
-              top: `${Math.min(link.from[1], link.to[1])}%`,
-              width: `${Math.hypot(link.to[0] - link.from[0], link.to[1] - link.from[1])}%`,
-              transform: `rotate(${Math.atan2(link.to[1] - link.from[1], link.to[0] - link.from[0])}rad)`,
-            }}
-          >
-            <span>{link.label}</span>
-          </div>
-        ))}
-
-        <TopologyNode
-          icon={<Cpu aria-hidden="true" />}
-          label="Branch PC"
-          detail="192.168.20.45/24"
-          x={14}
-          y={74}
-          ok={health.gatewayReachable}
-        />
-        <TopologyNode
-          icon={<Cable aria-hidden="true" />}
-          label="BR-SW1"
-          detail={`Fa0/3 VLAN ${state.branchAccessVlan}`}
-          x={34}
-          y={42}
-          ok={health.accessVlanOk}
-        />
-        <TopologyNode
-          icon={<Network aria-hidden="true" />}
-          label="BR-R1"
-          detail="192.168.20.1 / 10.0.0.2"
-          x={54}
-          y={42}
-          ok={health.branchLanAdvertised}
-        />
-        <TopologyNode
-          icon={<Network aria-hidden="true" />}
-          label="HQ-R1"
-          detail={health.hqReturnRoute ? 'Has branch route' : 'Missing branch route'}
-          x={76}
-          y={42}
-          ok={health.hqReturnRoute}
-        />
-        <TopologyNode
-          icon={<Server aria-hidden="true" />}
-          label="HQ Server"
-          detail="10.10.10.10"
-          x={90}
-          y={74}
-          ok={health.endToEnd}
-        />
-      </div>
-    </div>
-  );
-}
-
-function TopologyNode({
-  icon,
-  label,
-  detail,
-  x,
-  y,
-  ok,
-}: {
-  icon: ReactNode;
-  label: string;
-  detail: string;
-  x: number;
-  y: number;
-  ok: boolean;
-}) {
-  return (
-    <div className={`topology-node ${ok ? 'node-ok' : 'node-bad'}`} style={{ left: `${x}%`, top: `${y}%` }}>
-      <div className="node-icon">{icon}</div>
-      <strong>{label}</strong>
-      <span>{detail}</span>
-    </div>
-  );
-}
 
 function SubnetPanel({
   state,
@@ -776,6 +653,14 @@ function ConsoleOverlay({
         </header>
 
         <div className="console-grid">
+          <TopologyView state={state} activeDevice={activeDevice} onSelectDevice={(device) => {
+            setActiveDevice(device);
+            requestAnimationFrame(() => {
+              const input = document.getElementById('terminal-command');
+              input?.scrollIntoView({ block: 'nearest' });
+              input?.focus({ preventScroll: true });
+            });
+          }} />
           <div className="console-left">
             <MissionPanel
               state={state}
@@ -789,7 +674,6 @@ function ConsoleOverlay({
           </div>
 
           <div className="console-center">
-            <TopologyView state={state} />
             <TerminalPanel
               activeDevice={activeDevice}
               setActiveDevice={setActiveDevice}

@@ -263,6 +263,33 @@ export function routeHealth(state: SimState) {
   };
 }
 
+export type TopologyLink = {
+  id: string;
+  from: string;
+  to: string;
+  fromPort: string;
+  toPort: string;
+  status: 'up' | 'blocked' | 'down';
+  label: string;
+  detail: string;
+};
+
+export function topologyLinks(state: SimState): TopologyLink[] {
+  const health = routeHealth(state);
+  const up = (...keys: string[]) => keys.every((key) => !state.shutdownInterfaces.includes(key));
+  const accessUp = up('br-sw1:FastEthernet0/3');
+  const uplinkUp = up('br-sw1:FastEthernet0/1', 'br-r1:GigabitEthernet0/1');
+  const uplinkVlanOk = state.portModes['FastEthernet0/1'] === 'access' && state.portVlans['FastEthernet0/1'] === 20;
+  const wanUp = up('br-r1:GigabitEthernet0/0', 'hq-r1:GigabitEthernet0/0');
+  const serverUp = up('hq-r1:GigabitEthernet0/1');
+  return [
+    { id: 'access', from: 'Branch PC', to: 'BR-SW1', fromPort: 'eth0', toPort: 'Fa0/3', status: !accessUp ? 'down' : health.accessVlanOk ? 'up' : 'blocked', label: !accessUp ? 'Port down' : health.accessVlanOk ? 'VLAN 20' : 'VLAN mismatch', detail: !accessUp ? 'Fa0/3 is shut down' : health.accessVlanOk ? 'Access port / VLAN 20' : `Fa0/3: ${state.portModes['FastEthernet0/3']}, VLAN ${state.branchAccessVlan}; expected access VLAN 20` },
+    { id: 'uplink', from: 'BR-SW1', to: 'BR-R1', fromPort: 'Fa0/1', toPort: 'Gi0/1', status: !uplinkUp ? 'down' : uplinkVlanOk ? 'up' : 'blocked', label: !uplinkUp ? 'Port down' : uplinkVlanOk ? 'Branch LAN' : 'VLAN mismatch', detail: !uplinkUp ? 'A branch uplink interface is shut down' : uplinkVlanOk ? '192.168.20.0/24' : `Fa0/1: ${state.portModes['FastEthernet0/1']}, VLAN ${state.portVlans['FastEthernet0/1']}; expected access VLAN 20` },
+    { id: 'wan', from: 'BR-R1', to: 'HQ-R1', fromPort: 'Gi0/0', toPort: 'Gi0/0', status: !wanUp ? 'down' : health.ospfNeighborFull ? 'up' : 'blocked', label: !wanUp ? 'WAN down' : health.ospfNeighborFull ? 'OSPF FULL' : 'OSPF down', detail: !wanUp ? 'A WAN interface is shut down' : health.ospfNeighborFull ? '10.0.0.0/30' : 'Link up; no OSPF adjacency' },
+    { id: 'server', from: 'HQ-R1', to: 'HQ Server', fromPort: 'Gi0/1', toPort: 'eth0', status: serverUp ? 'up' : 'down', label: serverUp ? 'HQ LAN' : 'Port down', detail: serverUp ? '10.10.10.0/24' : 'HQ-R1 Gi0/1 is shut down' },
+  ];
+}
+
 export function promptFor(device: DeviceId, mode: TerminalMode) {
   const name = deviceLabels[device].replace('Branch PC', 'branch-pc');
   if (device === 'branch-pc') return 'branch-pc$';
