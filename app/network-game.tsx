@@ -3,6 +3,11 @@
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createNetworkRoom } from './room-scene';
 import {
   ArrowDown,
   ArrowLeft,
@@ -730,186 +735,38 @@ function NetworkRoom({
     if (!mount) return undefined;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x080d0e);
-    scene.fog = new THREE.Fog(0x080d0e, 12, 30);
-
-    const camera = new THREE.PerspectiveCamera(66, mount.clientWidth / mount.clientHeight, 0.1, 100);
-    camera.position.set(0, 1.62, 6.2);
+    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.08, 50);
+    const narrowView = mount.clientWidth < 700;
+    camera.position.set(narrowView ? -4.65 : 0, 1.68, 4.4);
     camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, mount.clientWidth < 700 ? 1.25 : 1.5));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     mount.appendChild(renderer.domElement);
-
-    const floorMat = new THREE.MeshStandardMaterial({ color: 0x303433, roughness: 0.78, metalness: 0.08 });
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x141a1b, roughness: 0.65, metalness: 0.02 });
-    const rackMat = new THREE.MeshStandardMaterial({ color: 0x1d2426, roughness: 0.42, metalness: 0.58 });
-    const metalMat = new THREE.MeshStandardMaterial({ color: 0x30393b, roughness: 0.38, metalness: 0.5 });
-    const deskMat = new THREE.MeshStandardMaterial({ color: 0x4d4035, roughness: 0.5, metalness: 0.12 });
-    const screenMat = new THREE.MeshStandardMaterial({
-      color: 0x071114,
-      emissive: 0x0b4f5d,
-      emissiveIntensity: 0.65,
-      roughness: 0.2,
-    });
-    const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0xa8d8dc,
-      transparent: true,
-      opacity: 0.18,
-      roughness: 0.08,
-      transmission: 0.25,
-      metalness: 0,
-    });
-    const amberMat = new THREE.MeshStandardMaterial({
-      color: 0xffb238,
-      emissive: 0xff8a00,
-      emissiveIntensity: 1.1,
-    });
-    const greenMat = new THREE.MeshStandardMaterial({
-      color: 0x42f58a,
-      emissive: 0x20d86a,
-      emissiveIntensity: 1.2,
-    });
-    const redMat = new THREE.MeshStandardMaterial({
-      color: 0xff4f5f,
-      emissive: 0xff2238,
-      emissiveIntensity: 1.1,
-    });
-    const blueMat = new THREE.MeshStandardMaterial({
-      color: 0x4bb6ff,
-      emissive: 0x1d82c3,
-      emissiveIntensity: 0.8,
-    });
-
-    const addBox = (
-      size: [number, number, number],
-      position: [number, number, number],
-      material: THREE.Material,
-      castShadow = true,
-      receiveShadow = true,
-    ) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
-      mesh.position.set(...position);
-      mesh.castShadow = castShadow;
-      mesh.receiveShadow = receiveShadow;
-      scene.add(mesh);
-      return mesh;
-    };
-
-    addBox([14, 0.18, 18], [0, -0.09, 0], floorMat, false, true);
-    addBox([14, 5, 0.24], [0, 2.45, -8.2], wallMat, false, true);
-    addBox([0.24, 5, 18], [-7.1, 2.45, 0], wallMat, false, true);
-    addBox([0.24, 5, 18], [7.1, 2.45, 0], wallMat, false, true);
-    addBox([14, 0.16, 18], [0, 4.95, 0], wallMat, false, true);
-    addBox([7.4, 2.4, 0.08], [0, 2.4, 7.6], glassMat, false, false);
-
-    const grid = new THREE.GridHelper(13.5, 18, 0x415154, 0x252d2f);
-    grid.position.y = 0.015;
-    scene.add(grid);
-
-    const hemi = new THREE.HemisphereLight(0xb8eef4, 0x15100d, 1.1);
-    scene.add(hemi);
-
-    const keyLight = new THREE.DirectionalLight(0xc6f5ff, 2.2);
-    keyLight.position.set(1.5, 6, 4);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(2048, 2048);
-    scene.add(keyLight);
-
-    const accentLight = new THREE.PointLight(0x19d3b5, 2.2, 9);
-    accentLight.position.set(-3.2, 2.7, -3);
-    scene.add(accentLight);
-
-    const warningLight = new THREE.PointLight(0xff9c3d, 1.3, 6);
-    warningLight.position.set(3.4, 2.3, -3.6);
-    scene.add(warningLight);
-
-    addBox([3.8, 0.18, 0.2], [0, 3.35, -8.04], blueMat, false, false);
-    addBox([2.4, 0.18, 0.2], [-3.1, 3.35, -8.04], amberMat, false, false);
-    addBox([2.2, 0.18, 0.2], [3.2, 3.35, -8.04], greenMat, false, false);
-
-    const issueLight = new THREE.Mesh(new THREE.SphereGeometry(0.105, 24, 16), redMat);
-    issueLight.position.set(-4.46, 2.02, -3.25);
-    scene.add(issueLight);
-
-    const ospfLight = new THREE.Mesh(new THREE.SphereGeometry(0.105, 24, 16), amberMat);
-    ospfLight.position.set(4.46, 2.02, -3.25);
-    scene.add(ospfLight);
-
-    const createRack = (x: number, z: number, labelColor: THREE.Material) => {
-      addBox([1.34, 3.1, 0.94], [x, 1.55, z], rackMat);
-      addBox([1.12, 0.18, 0.84], [x, 2.72, z - 0.03], metalMat);
-      addBox([1.12, 0.18, 0.84], [x, 2.27, z - 0.03], metalMat);
-      addBox([1.12, 0.18, 0.84], [x, 1.82, z - 0.03], metalMat);
-      addBox([1.12, 0.18, 0.84], [x, 1.37, z - 0.03], metalMat);
-      addBox([0.92, 0.06, 0.05], [x, 2.84, z - 0.51], labelColor, false, false);
-      addBox([0.92, 0.06, 0.05], [x, 1.49, z - 0.51], labelColor, false, false);
-
-      for (let i = 0; i < 6; i += 1) {
-        const light = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 8), greenMat);
-        light.position.set(x - 0.46 + i * 0.18, 2.27, z - 0.51);
-        scene.add(light);
-      }
-    };
-
-    createRack(-4.6, -3.2, amberMat);
-    createRack(4.6, -3.2, greenMat);
-    createRack(0, -2.5, blueMat);
-
-    addBox([3.4, 0.22, 1.28], [0, 0.78, -5.2], deskMat);
-    addBox([0.18, 1.35, 1.08], [-1.45, 0.08, -5.2], deskMat);
-    addBox([0.18, 1.35, 1.08], [1.45, 0.08, -5.2], deskMat);
-    const monitor = addBox([1.34, 0.82, 0.08], [0, 1.48, -5.72], screenMat, true, false);
-    monitor.rotation.x = -0.06;
-    addBox([0.9, 0.08, 0.36], [0, 0.96, -4.7], metalMat);
-    addBox([0.8, 0.04, 0.22], [0, 1.04, -4.58], screenMat, true, false);
-
-    const chairMat = new THREE.MeshStandardMaterial({ color: 0x252224, roughness: 0.55, metalness: 0.2 });
-    addBox([0.88, 0.16, 0.84], [0, 0.53, -3.72], chairMat);
-    addBox([0.88, 1.0, 0.12], [0, 1.07, -3.32], chairMat);
-
-    const curves = [
-      new THREE.CatmullRomCurve3([
-        new THREE.Vector3(-4.6, 2.3, -2.72),
-        new THREE.Vector3(-3.2, 2.45, -1.8),
-        new THREE.Vector3(0, 2.25, -2.0),
-      ]),
-      new THREE.CatmullRomCurve3([
-        new THREE.Vector3(0, 2.15, -2.0),
-        new THREE.Vector3(2.8, 2.45, -1.8),
-        new THREE.Vector3(4.6, 2.3, -2.72),
-      ]),
-      new THREE.CatmullRomCurve3([
-        new THREE.Vector3(-4.6, 1.45, -2.72),
-        new THREE.Vector3(-3.4, 1.15, -4.2),
-        new THREE.Vector3(0, 1.12, -4.72),
-      ]),
-    ];
-
-    curves.forEach((curve, index) => {
-      const cableMat = new THREE.MeshStandardMaterial({
-        color: index === 0 ? 0xf2be4b : index === 1 ? 0x3fb1d4 : 0x55d687,
-        roughness: 0.35,
-        metalness: 0.05,
-      });
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.025, 8, false), cableMat);
-      tube.castShadow = true;
-      scene.add(tube);
-    });
-
-    const packet = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), greenMat);
-    scene.add(packet);
-
-    const consoleTarget = new THREE.Vector3(0, 0, -4.75);
+    const room = createNetworkRoom(scene, renderer);
+    const consoleTarget = room.consoleTarget;
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const ambientOcclusion = new SSAOPass(scene, camera, mount.clientWidth, mount.clientHeight, 12);
+    ambientOcclusion.kernelRadius = 1.5;
+    ambientOcclusion.minDistance = 0.001;
+    ambientOcclusion.maxDistance = 0.035;
+    ambientOcclusion.enabled = mount.clientWidth >= 800;
+    composer.addPass(ambientOcclusion);
+    const output = new OutputPass();
+    composer.addPass(output);
     const keys = new Set<string>();
     const yAxis = new THREE.Vector3(0, 1, 0);
-    let yaw = 0;
-    let pitch = 0;
+    let yaw = narrowView ? -0.45 : 0;
+    let pitch = -0.035;
     let frameId = 0;
+    let touchLook: { id: number; x: number; y: number } | null = null;
 
     const onResize = () => {
       const width = mount.clientWidth;
@@ -917,6 +774,8 @@ function NetworkRoom({
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+      composer.setSize(width, height);
+      ambientOcclusion.enabled = width >= 800;
     };
 
     const onPointerLockChange = () => {
@@ -941,18 +800,43 @@ function NetworkRoom({
       keys.delete(event.key.toLowerCase());
     };
 
-    const onCanvasClick = () => {
-      if (!statusRef.current.consoleOpen) {
-        void renderer.domElement.requestPointerLock?.();
+    const clearMovement = () => {
+      keys.clear();
+      touchKeysRef.current.clear();
+      touchLook = null;
+    };
+
+    const onTouchStart = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || statusRef.current.consoleOpen) return;
+      touchLook = { id: event.pointerId, x: event.clientX, y: event.clientY };
+      renderer.domElement.setPointerCapture(event.pointerId);
+    };
+
+    const onTouchMove = (event: PointerEvent) => {
+      if (!touchLook || event.pointerId !== touchLook.id || statusRef.current.consoleOpen) return;
+      yaw -= (event.clientX - touchLook.x) * 0.004;
+      pitch = THREE.MathUtils.clamp(pitch - (event.clientY - touchLook.y) * 0.004, -1.12, 1.12);
+      touchLook = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    };
+    const onTouchEnd = () => { touchLook = null; };
+
+    const onCanvasClick = (event: PointerEvent) => {
+      if (!statusRef.current.consoleOpen && event.pointerType !== 'touch') {
+        renderer.domElement.requestPointerLock?.()?.catch(() => undefined);
       }
     };
 
     window.addEventListener('resize', onResize);
+    window.addEventListener('blur', clearMovement);
     document.addEventListener('pointerlockchange', onPointerLockChange);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
     renderer.domElement.addEventListener('click', onCanvasClick);
+    renderer.domElement.addEventListener('pointerdown', onTouchStart);
+    renderer.domElement.addEventListener('pointermove', onTouchMove);
+    renderer.domElement.addEventListener('pointerup', onTouchEnd);
+    renderer.domElement.addEventListener('pointercancel', onTouchEnd);
 
     let lastFrame = performance.now();
 
@@ -984,11 +868,12 @@ function NetworkRoom({
       if (canMove && move.lengthSq() > 0) {
         move.normalize();
         const speed = keys.has('shift') ? 5.2 : 3.1;
-        camera.position.addScaledVector(move, speed * delta);
-        camera.position.x = THREE.MathUtils.clamp(camera.position.x, -5.9, 5.9);
-        camera.position.z = THREE.MathUtils.clamp(camera.position.z, -6.8, 6.9);
+        const nextX = camera.position.x + move.x * speed * delta;
+        const nextZ = camera.position.z + move.z * speed * delta;
+        if (room.canStandAt(nextX, camera.position.z)) camera.position.x = nextX;
+        if (room.canStandAt(camera.position.x, nextZ)) camera.position.z = nextZ;
       }
-      camera.position.y = 1.62;
+      camera.position.y = 1.68;
       camera.rotation.y = yaw;
       camera.rotation.x = pitch;
       mount.dataset.camera = `${camera.position.x.toFixed(2)},${camera.position.y.toFixed(2)},${camera.position.z.toFixed(2)}`;
@@ -997,18 +882,8 @@ function NetworkRoom({
       const flatDistance = Math.hypot(camera.position.x - consoleTarget.x, camera.position.z - consoleTarget.z);
       setNearConsole(flatDistance < 2.35);
 
-      issueLight.material = health.accessVlanOk ? greenMat : redMat;
-      ospfLight.material = health.branchLanAdvertised ? greenMat : amberMat;
-      warningLight.color.set(health.endToEnd ? 0x34f083 : 0xff9c3d);
-      warningLight.intensity = health.endToEnd ? 0.9 : 1.5;
-
-      const packetCurve = health.hqReturnRoute ? curves[1] : health.gatewayReachable ? curves[0] : curves[2];
-      const t = (elapsed * (health.endToEnd ? 0.22 : 0.12)) % 1;
-      packet.position.copy(packetCurve.getPointAt(t));
-      packet.visible = health.gatewayReachable || health.endToEnd;
-      packet.scale.setScalar(health.endToEnd ? 1.1 + Math.sin(elapsed * 7) * 0.16 : 0.85);
-
-      renderer.render(scene, camera);
+      room.update(health, elapsed);
+      composer.render();
       frameId = requestAnimationFrame(animate);
     };
 
@@ -1017,17 +892,21 @@ function NetworkRoom({
     return () => {
       cancelAnimationFrame(frameId);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('blur', clearMovement);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('keyup', onKeyUp);
       renderer.domElement.removeEventListener('click', onCanvasClick);
+      renderer.domElement.removeEventListener('pointerdown', onTouchStart);
+      renderer.domElement.removeEventListener('pointermove', onTouchMove);
+      renderer.domElement.removeEventListener('pointerup', onTouchEnd);
+      renderer.domElement.removeEventListener('pointercancel', onTouchEnd);
+      room.dispose();
+      ambientOcclusion.dispose();
+      output.dispose();
+      composer.dispose();
       renderer.dispose();
-      scene.traverse((object) => {
-        if (object instanceof THREE.Mesh) {
-          object.geometry.dispose();
-        }
-      });
       mount.removeChild(renderer.domElement);
     };
   }, [onOpenConsole]);
