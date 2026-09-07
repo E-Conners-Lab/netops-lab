@@ -440,7 +440,128 @@ input {
 }
 
 .console-right {
-  grid-template-rows: max-content max-content;
+  grid-auto-rows: max-content;
+}
+
+.room-assignment {
+  position: absolute;
+  z-index: 3;
+  left: 28px;
+  top: 126px;
+  width: min(330px, calc(100% - 56px));
+  padding: 18px 20px;
+  border-left: 3px solid #e3c168;
+  background: rgb(13 23 26 / 85%);
+  color: #edf3f2;
+  pointer-events: none;
+}
+
+.room-assignment h1 {
+  margin: 8px 0 10px;
+  font-size: 26px;
+  line-height: 1.15;
+  font-weight: 650;
+}
+
+.room-assignment p {
+  color: #c8d5d4;
+  font-size: 15px;
+  line-height: 1.5;
+  margin: 0 0 18px;
+}
+
+.room-assignment > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #dfc37c;
+  font-size: 12px;
+}
+
+.assignment-dot {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.console-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.guide-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #d4e1df;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.guide-toggle input {
+  width: 17px;
+  height: 17px;
+  accent-color: #9fd4ad;
+}
+
+.field-guide {
+  min-width: 0;
+  padding: 16px;
+  background: #192a2c;
+  border-top: 3px solid #d9bd6b;
+  color: #edf2ed;
+}
+
+.guide-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #dbc888;
+  font-size: 13px;
+}
+
+.guide-heading > span:last-child { margin-left: auto; }
+.guide-heading svg, .guide-hint svg { width: 16px; height: 16px; flex-shrink: 0; }
+.field-guide h2 { margin: 12px 0 8px; font-size: 20px; line-height: 1.25; font-weight: 650; }
+.field-guide p { margin: 0; color: #cedbd7; font-size: 14px; line-height: 1.55; }
+.guide-progress { display: flex; gap: 4px; margin: 16px 0; }
+.guide-progress i { height: 3px; flex: 1; background: #3b4d4d; }
+.guide-progress .filled { background: #d6bd72; }
+.guide-connect { width: 100%; justify-content: space-between; min-height: 38px; }
+.guide-connect svg { flex-shrink: 0; }
+.field-guide .guide-clue { margin-top: 16px; padding-left: 12px; border-left: 2px solid #8fafa8; }
+.guide-example { margin-top: 16px; }
+.guide-example > span { font-size: 12px; color: #b1c7c1; }
+.guide-example pre { white-space: pre-wrap; overflow-wrap: anywhere; color: #f0e4b9; font-size: 13px; line-height: 1.65; margin: 8px 0 12px; }
+.guide-example p { font-size: 13px; }
+.guide-hint { display: flex; align-items: center; width: 100%; gap: 8px; padding: 13px 0 0; color: #dbca92; font-size: 14px; cursor: pointer; }
+.guide-hint svg:last-child { margin-left: auto; }
+.guide-hint:hover { color: #fff1be; }
+.guide-hint:focus-visible { outline: 2px solid #d6bd72; outline-offset: 4px; }
+.guide-complete { border-color: #8fd7af; }
+.guide-complete .guide-heading { color: #a9dfbd; }
+
+@media (max-width: 1180px) {
+  .console-grid .console-right { display: contents; }
+  .console-grid > .topology-panel { order: 1; }
+  .console-grid .field-guide { order: 2; }
+  .console-grid .console-center { order: 3; }
+  .console-grid .console-left { order: 4; }
+  .console-grid .diff-panel { order: 5; }
+  .console-grid .mastery-panel { order: 6; }
+  .room-assignment { width: 290px; padding: 14px 16px; }
+}
+
+@media (max-width: 720px) {
+  .hud-top .hud-pill { display: none; }
+  .room-assignment { top: 110px; left: 20px; width: calc(100% - 40px); padding: 12px 14px; }
+  .room-assignment h1 { font-size: 22px; margin: 6px 0; }
+  .room-assignment p { font-size: 14px; margin-bottom: 10px; }
+  .console-header-actions { gap: 12px; justify-content: space-between; width: 100%; }
 }
 
 .mission-panel,
@@ -562,30 +683,31 @@ input {
 
 .subnet-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 5px;
 }
 
 .subnet-block {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 6px;
   min-width: 0;
-  min-height: 74px;
-  border: 1px solid rgb(170 219 209 / 16%);
-  border-radius: 7px;
-  padding: 9px;
+  min-height: 38px;
+  border-left: 2px solid #94c6a4;
+  padding: 8px;
 }
 
 .subnet-block span {
   color: #a9c4bd;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .subnet-block strong {
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   color: #f1f7f5;
   font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -595,6 +717,7 @@ input {
 
 .subnet-block.reserved {
   background: rgb(233 187 84 / 10%);
+  border-color: #d5bc73;
 }
 
 .binary-row {

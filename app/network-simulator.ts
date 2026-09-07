@@ -1,5 +1,6 @@
 export type DeviceId = 'branch-pc' | 'br-sw1' | 'br-r1' | 'hq-r1';
 export type TerminalMode = 'user-exec' | 'exec' | 'config' | 'interface' | 'router-ospf';
+export type Observation = 'pc-address' | 'pc-route' | 'access-vlan' | 'gateway-test' | 'return-route';
 
 export type SimState = {
   branchAccessVlan: number;
@@ -14,6 +15,7 @@ export type SimState = {
   viewedSubnet: boolean;
   usedShowCommands: number;
   badCommands: number;
+  observations: Observation[];
 };
 
 export type TerminalEntry = {
@@ -58,7 +60,12 @@ export const initialState: SimState = {
   viewedSubnet: false,
   usedShowCommands: 0,
   badCommands: 0,
+  observations: [],
 };
+
+function observe(state: SimState, observation: Observation): SimState {
+  return { ...state, observations: [...new Set([...state.observations, observation])] };
+}
 
 export const starterHistory: TerminalEntry[] = [
   {
@@ -432,14 +439,19 @@ function runPcCommand(command: string, state: SimState): CommandResult {
   }
   if (cmd === 'ip addr' || cmd === 'ip a' || cmd === 'ifconfig') {
     return {
+      state: observe(state, 'pc-address'),
       output:
         '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet 192.168.20.45/24 brd 192.168.20.255 scope global eth0\n    ether 00:50:56:ad:20:45',
     };
   }
   if (cmd === 'ip route' || cmd === 'route -n') {
-    return { output: routeTable('branch-pc', state) };
+    return { output: routeTable('branch-pc', state), state: observe(state, 'pc-route') };
   }
-  if (cmd.startsWith('ping ')) return pingOutput('branch-pc', command.trim().slice(5), state);
+  if (cmd.startsWith('ping ')) {
+    const result = pingOutput('branch-pc', command.trim().slice(5), state);
+    return cmd === 'ping 192.168.20.1' && routeHealth(state).gatewayReachable
+      ? { ...result, state: observe(result.state ?? state, 'gateway-test') } : result;
+  }
   if (cmd.startsWith('traceroute ') || cmd.startsWith('tracepath ')) {
     const target = command.trim().replace(/^(traceroute|tracepath)\s+/i, '');
     return tracerouteOutput('branch-pc', target, state);
@@ -485,7 +497,8 @@ export function runCommand(device: DeviceId, command: string, state: SimState, m
   }
   const update = (changes: Partial<SimState>): CommandResult => {
     const changed = { ...state, ...changes };
-    return { output: '', state: { ...changed, verifiedBranchToHq: state.verifiedBranchToHq && routeHealth(changed).endToEnd } };
+    const health = routeHealth(changed);
+    return { output: '', state: { ...changed, observations: health.gatewayReachable ? changed.observations : changed.observations.filter((item) => item !== 'gateway-test'), verifiedBranchToHq: state.verifiedBranchToHq && health.endToEnd } };
   };
   if (action === 'help') return { output: 'Use ? for commands in the current mode, or after a keyword for available arguments.\nOnly the interfaces and features exposed by this lab are simulated.', status: 'info' };
   if (action === 'enable') return { output: '', nextMode: 'exec' };
@@ -518,7 +531,10 @@ export function runCommand(device: DeviceId, command: string, state: SimState, m
     else if (action === 'show interfaces' || action === 'show ip interface') output = interfaces[device].map((iface) => interfaceDetails(device, iface, state)).join('\n\n');
     else if (action === 'show version') output = `${deviceLabels[device]} - NetOps Lab IOS-compatible simulator\nPlatform: ${deviceKinds[device]}\nSimulated interfaces: ${interfaces[device].join(', ')}\nThis is a simulated CLI, not a Cisco IOS image.`;
     else if (action === 'show cdp neighbors') output = 'Device ID        Local Intrfce       Holdtme    Capability    Port ID\n' + (device === 'br-sw1' ? 'BR-R1            Fas 0/1             144        R             Gig 0/1' : device === 'br-r1' ? 'BR-SW1           Gig 0/1             144        S             Fas 0/1\nHQ-R1            Gig 0/0             155        R             Gig 0/0' : 'BR-R1            Gig 0/0             155        R             Gig 0/0');
-    return { output, state: { ...state, usedShowCommands: state.usedShowCommands + 1 } };
+    let inspected = state;
+    if (device === 'br-sw1' && (action === 'show vlan' || action === 'show vlan brief' || action === 'show interfaces status' || action === 'show running-config' || (action === 'show interfaces <interface> switchport' && words[2] === 'FastEthernet0/3') || (action === 'show running-config interface <interface>' && words[3] === 'FastEthernet0/3'))) inspected = observe(inspected, 'access-vlan');
+    if (device === 'hq-r1' && (action === 'show ip route' || action === 'show ip route ospf')) inspected = observe(inspected, 'return-route');
+    return { output, state: { ...inspected, usedShowCommands: state.usedShowCommands + 1 } };
   }
   if (action.includes('network <address>')) {
     const remove = words[0] === 'no';

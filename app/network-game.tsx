@@ -7,8 +7,10 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
 import { createNetworkRoom } from './room-scene';
 import { TopologyView } from './topology-view';
+import { guidanceCommands, missionGuidance } from './mission-guidance';
 import {
   ArrowDown,
   ArrowLeft,
@@ -16,6 +18,7 @@ import {
   ArrowUp,
   Cable,
   Check,
+  BookOpen,
   ChevronRight,
   CircleAlert,
   CircleHelp,
@@ -117,7 +120,7 @@ function NetworkRoom({
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.08, 50);
     const narrowView = mount.clientWidth < 700;
-    camera.position.set(narrowView ? -4.65 : 0, 1.68, 4.4);
+    camera.position.set(narrowView ? 0.1 : 1.1, 1.68, narrowView ? 4.4 : 3.7);
     camera.rotation.order = 'YXZ';
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -125,9 +128,10 @@ function NetworkRoom({
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 1.12;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.info.autoReset = false;
     mount.appendChild(renderer.domElement);
     const room = createNetworkRoom(scene, renderer);
     const consoleTarget = room.consoleTarget;
@@ -141,10 +145,12 @@ function NetworkRoom({
     composer.addPass(ambientOcclusion);
     const output = new OutputPass();
     composer.addPass(output);
+    const antialiasing = new FXAAPass();
+    composer.addPass(antialiasing);
     const keys = new Set<string>();
     const yAxis = new THREE.Vector3(0, 1, 0);
-    let yaw = narrowView ? -0.45 : 0;
-    let pitch = -0.035;
+    let yaw = narrowView ? 0.025 : 0.17;
+    let pitch = -0.07;
     let frameId = 0;
     let touchLook: { id: number; x: number; y: number } | null = null;
 
@@ -153,7 +159,9 @@ function NetworkRoom({
       const height = mount.clientHeight;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, width < 700 ? 1.25 : 1.5));
       renderer.setSize(width, height);
+      composer.setPixelRatio(renderer.getPixelRatio());
       composer.setSize(width, height);
       ambientOcclusion.enabled = width >= 800;
     };
@@ -263,7 +271,9 @@ function NetworkRoom({
       setNearConsole(flatDistance < 2.35);
 
       room.update(health, elapsed);
+      renderer.info.reset();
       composer.render();
+      mount.dataset.drawCalls = String(renderer.info.render.calls);
       frameId = requestAnimationFrame(animate);
     };
 
@@ -285,6 +295,7 @@ function NetworkRoom({
       room.dispose();
       ambientOcclusion.dispose();
       output.dispose();
+      antialiasing.dispose();
       composer.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
@@ -308,6 +319,13 @@ function NetworkRoom({
           <span>{pointerLocked ? 'Mouse look active' : 'Click scene for mouse look'}</span>
         </div>
       </div>
+
+      {!consoleOpen && !pointerLocked && !nearConsole ? <div className="room-assignment">
+        <span className="eyebrow">{state.verifiedBranchToHq ? 'Assignment complete' : 'Your first assignment'}</span>
+        <h1>{state.verifiedBranchToHq ? 'Branch back online' : 'A branch has gone offline.'}</h1>
+        <p>{state.verifiedBranchToHq ? 'Local access restored. Return route learned. End-to-end test passed.' : 'One workstation. Two network faults. Restore the connection to HQ.'}</p>
+        <div><span className="assignment-dot" />{state.verifiedBranchToHq ? 'NOC-1047 resolved' : 'NOC-1047 / awaiting investigation'}</div>
+      </div> : null}
 
       <div className="hud-bottom">
         <div className="movement-hint">
@@ -527,9 +545,9 @@ function TerminalPanel({ activeDevice, setActiveDevice, state, setState, session
 function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void }) {
   const health = routeHealth(state);
   const objectiveItems = [
-    { text: 'Inspect BR-SW1 access VLAN', done: state.usedShowCommands > 0 || health.accessVlanOk },
-    { text: 'Place Fa0/3 in VLAN 20', done: health.accessVlanOk },
-    { text: 'Advertise 192.168.20.0/24 in OSPF', done: health.branchLanAdvertised },
+    { text: 'Inspect the workstation VLAN', done: state.observations.includes('access-vlan') },
+    { text: 'Restore local gateway access', done: health.gatewayReachable },
+    { text: 'Restore the OSPF return route', done: health.hqReturnRoute },
     { text: 'Verify Branch PC to 10.10.10.10', done: state.verifiedBranchToHq },
   ];
 
@@ -559,12 +577,33 @@ function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void
         ))}
       </div>
 
-      <div className="mentor-box">
+      {state.verifiedBranchToHq && health.endToEnd ? <div className="mentor-box">
         <CircleHelp aria-hidden="true" />
         <p>{explainFix(state)}</p>
-      </div>
+      </div> : null}
     </aside>
   );
+}
+
+function FieldGuide({ state, sessions, activeDevice, onSelectDevice }: { state: SimState; sessions: Sessions; activeDevice: DeviceId; onSelectDevice: (device: DeviceId) => void }) {
+  const guide = missionGuidance(state, routeHealth(state));
+  const [revealed, setRevealed] = useState<Record<string, number>>({});
+  const level = revealed[guide.id] ?? 0;
+  const complete = guide.id === 'complete';
+  const guideRef = useRef<HTMLElement | null>(null);
+  useEffect(() => { guideRef.current?.parentElement?.scrollTo({top: 0}); }, [guide.id]);
+  return <section ref={guideRef} className={`field-guide ${complete ? 'guide-complete' : ''}`} aria-labelledby="guide-title" data-guide-stage={guide.id}>
+    <div className="guide-heading"><BookOpen aria-hidden="true" /><span>{complete ? 'Mission debrief' : 'Field guide'}</span><span>{guide.step} / 7</span></div>
+    <h2 id="guide-title">{guide.title}</h2>
+    <p>{guide.objective}</p>
+    <div className="guide-progress" aria-hidden="true">{Array.from({length: 7}, (_, i) => <i key={i} className={i < guide.step ? 'filled' : ''} />)}</div>
+    {complete ? <p className="guide-clue">{guide.clue}</p> : <>
+      <Button variant="secondary" onClick={() => onSelectDevice(guide.device)} className="guide-connect"><Terminal aria-hidden="true" />{activeDevice === guide.device ? `Focus ${deviceLabels[guide.device]}` : `Connect to ${deviceLabels[guide.device]}`}<ArrowRight aria-hidden="true" /></Button>
+      {level >= 1 ? <p className="guide-clue">{guide.clue}</p> : null}
+      {level >= 2 ? <div className="guide-example"><span>Command reference / {deviceLabels[guide.device]}</span><pre>{guidanceCommands(guide, sessions[guide.device].mode).join('\n')}</pre><p>{guide.expected}</p></div> : null}
+      {level < 2 ? <button type="button" className="guide-hint" onClick={() => setRevealed((current) => ({...current, [guide.id]: level + 1}))}><CircleHelp aria-hidden="true" />{level === 0 ? 'Give me a clue' : 'Show command reference'}<ChevronRight aria-hidden="true" /></button> : null}
+    </>}
+  </section>;
 }
 
 function DiffPanel({ state }: { state: SimState }) {
@@ -633,6 +672,16 @@ function ConsoleOverlay({
 }) {
   const [activeDevice, setActiveDevice] = useState<DeviceId>('branch-pc');
   const [sessions, setSessions] = useState<Sessions>(newSessions);
+  const [guided, setGuided] = useState(true);
+  const [guideRun, setGuideRun] = useState(0);
+  const selectDevice = (device: DeviceId) => {
+    setActiveDevice(device);
+    requestAnimationFrame(() => {
+      const input = document.getElementById('terminal-command');
+      input?.scrollIntoView({ block: 'nearest' });
+      input?.focus({ preventScroll: true });
+    });
+  };
   const handleViewedSubnet = useCallback(() => {
     setState((current) => (current.viewedSubnet ? current : { ...current, viewedSubnet: true }));
   }, [setState]);
@@ -647,20 +696,13 @@ function ConsoleOverlay({
             <span className="eyebrow">Topology Console</span>
             <h2>Branch to HQ Recovery Lab</h2>
           </div>
-          <Button variant="secondary" onClick={onClose}>
+          <div className="console-header-actions"><label className="guide-toggle"><input type="checkbox" checked={guided} onChange={(event) => setGuided(event.target.checked)} />Guided practice</label><Button variant="secondary" onClick={onClose}>
             Return to Room
-          </Button>
+          </Button></div>
         </header>
 
         <div className="console-grid">
-          <TopologyView state={state} activeDevice={activeDevice} onSelectDevice={(device) => {
-            setActiveDevice(device);
-            requestAnimationFrame(() => {
-              const input = document.getElementById('terminal-command');
-              input?.scrollIntoView({ block: 'nearest' });
-              input?.focus({ preventScroll: true });
-            });
-          }} />
+          <TopologyView state={state} activeDevice={activeDevice} onSelectDevice={selectDevice} />
           <div className="console-left">
             <MissionPanel
               state={state}
@@ -668,6 +710,7 @@ function ConsoleOverlay({
                 setState(initialState);
                 setActiveDevice('branch-pc');
                 setSessions(newSessions());
+                setGuideRun((current) => current + 1);
               }}
             />
             <SubnetPanel state={state} onViewed={handleViewedSubnet} />
@@ -685,6 +728,7 @@ function ConsoleOverlay({
           </div>
 
           <div className="console-right">
+            {guided ? <FieldGuide key={guideRun} state={state} sessions={sessions} activeDevice={activeDevice} onSelectDevice={selectDevice} /> : null}
             <DiffPanel state={state} />
             <MasteryPanel state={state} />
           </div>
