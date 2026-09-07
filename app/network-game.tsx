@@ -34,631 +34,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 
-type DeviceId = 'branch-pc' | 'br-sw1' | 'br-r1' | 'hq-r1';
-type TerminalMode = 'exec' | 'config' | 'interface' | 'router-ospf';
-
-type SimState = {
-  branchAccessVlan: number;
-  brOspfNetworks: string[];
-  verifiedBranchToHq: boolean;
-  viewedSubnet: boolean;
-  usedShowCommands: number;
-  badCommands: number;
-};
-
-type TerminalEntry = {
-  prompt: string;
-  command: string;
-  output: string;
-  status: 'ok' | 'error' | 'info';
-};
-
-type CommandResult = {
-  output: string;
-  status?: TerminalEntry['status'];
-  nextMode?: TerminalMode;
-  nextInterface?: string | null;
-  state?: SimState;
-};
-
-const deviceLabels: Record<DeviceId, string> = {
-  'branch-pc': 'Branch PC',
-  'br-sw1': 'BR-SW1',
-  'br-r1': 'BR-R1',
-  'hq-r1': 'HQ-R1',
-};
-
-const deviceKinds: Record<DeviceId, string> = {
-  'branch-pc': 'Linux client',
-  'br-sw1': 'Catalyst access switch',
-  'br-r1': 'Cisco branch router',
-  'hq-r1': 'Cisco HQ router',
-};
-
-const initialState: SimState = {
-  branchAccessVlan: 10,
-  brOspfNetworks: ['10.0.0.0 0.0.0.3 area 0'],
-  verifiedBranchToHq: false,
-  viewedSubnet: false,
-  usedShowCommands: 0,
-  badCommands: 0,
-};
-
-const starterHistory: TerminalEntry[] = [
-  {
-    prompt: 'mentor',
-    command: 'ticket accepted',
-    output:
-      'Ticket NOC-1047: Branch users cannot reach the HQ intranet at 10.10.10.10. Use the room console, inspect the topology, fix the network, then verify from the Branch PC.',
-    status: 'info',
-  },
-  {
-    prompt: 'mentor',
-    command: 'first moves',
-    output:
-      'Try show commands first. Good starting points: show vlan brief on BR-SW1, show ip route on BR-R1 or HQ-R1, and ping 10.10.10.10 from the Branch PC.',
-    status: 'info',
-  },
-];
-
-function normalizeCommand(command: string) {
-  return command.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-
-function isShow(command: string) {
-  return command === 'show' || command.startsWith('show ') || command === 'sh' || command.startsWith('sh ');
-}
-
-function isSwitch(device: DeviceId) {
-  return device === 'br-sw1';
-}
-
-function isRouter(device: DeviceId) {
-  return device === 'br-r1' || device === 'hq-r1';
-}
-
-function hasBranchLanOspf(state: SimState) {
-  return state.brOspfNetworks.includes('192.168.20.0 0.0.0.255 area 0');
-}
-
-function isVlanFixed(state: SimState) {
-  return state.branchAccessVlan === 20;
-}
-
-function routeHealth(state: SimState) {
-  return {
-    accessVlanOk: isVlanFixed(state),
-    gatewayReachable: isVlanFixed(state),
-    branchLanAdvertised: hasBranchLanOspf(state),
-    ospfNeighborFull: true,
-    hqReturnRoute: hasBranchLanOspf(state),
-    endToEnd: isVlanFixed(state) && hasBranchLanOspf(state),
-  };
-}
-
-function promptFor(device: DeviceId, mode: TerminalMode) {
-  const name = deviceLabels[device].replace('Branch PC', 'branch-pc');
-  if (device === 'branch-pc') return 'branch-pc$';
-  if (mode === 'config') return `${name}(config)#`;
-  if (mode === 'interface') return `${name}(config-if)#`;
-  if (mode === 'router-ospf') return `${name}(config-router)#`;
-  return `${name}#`;
-}
-
-function invalidCisco(command: string) {
-  const marker = command.length > 0 ? `${' '.repeat(Math.min(command.length, 18))}^` : '^';
-  return `% Invalid input detected at '^' marker.\n\n${command}\n${marker}`;
-}
-
-function countShowUse(command: string, state: SimState) {
-  if (!isShow(command)) return state;
-  return { ...state, usedShowCommands: state.usedShowCommands + 1 };
-}
-
-function switchRunningConfig(state: SimState) {
-  return [
-    'Building configuration...',
-    '',
-    'Current configuration : 1812 bytes',
-    '!',
-    'hostname BR-SW1',
-    '!',
-    'vlan 10',
-    ' name Guest-Staging',
-    'vlan 20',
-    ' name Branch-Users',
-    '!',
-    'interface FastEthernet0/1',
-    ' description uplink to BR-R1 Gi0/1',
-    ' switchport mode trunk',
-    ' switchport trunk allowed vlan 20',
-    '!',
-    'interface FastEthernet0/3',
-    ' description Branch training workstation',
-    ' switchport mode access',
-    ` switchport access vlan ${state.branchAccessVlan}`,
-    ' spanning-tree portfast',
-    '!',
-    'end',
-  ].join('\n');
-}
-
-function routerRunningConfig(device: DeviceId, state: SimState) {
-  if (device === 'hq-r1') {
-    return [
-      'Building configuration...',
-      '',
-      'Current configuration : 2310 bytes',
-      '!',
-      'hostname HQ-R1',
-      '!',
-      'interface GigabitEthernet0/0',
-      ' description WAN to BR-R1',
-      ' ip address 10.0.0.1 255.255.255.252',
-      ' no shutdown',
-      '!',
-      'interface GigabitEthernet0/1',
-      ' description HQ server network',
-      ' ip address 10.10.10.1 255.255.255.0',
-      ' no shutdown',
-      '!',
-      'router ospf 1',
-      ' router-id 1.1.1.1',
-      ' network 10.0.0.0 0.0.0.3 area 0',
-      ' network 10.10.10.0 0.0.0.255 area 0',
-      '!',
-      'end',
-    ].join('\n');
-  }
-
-  return [
-    'Building configuration...',
-    '',
-    'Current configuration : 2242 bytes',
-    '!',
-    'hostname BR-R1',
-    '!',
-    'interface GigabitEthernet0/0',
-    ' description WAN to HQ-R1',
-    ' ip address 10.0.0.2 255.255.255.252',
-    ' no shutdown',
-    '!',
-    'interface GigabitEthernet0/1',
-    ' description trunk to BR-SW1',
-    ' ip address 192.168.20.1 255.255.255.0',
-    ' no shutdown',
-    '!',
-    'router ospf 1',
-    ' router-id 2.2.2.2',
-    ...state.brOspfNetworks.map((network) => ` network ${network}`),
-    '!',
-    'end',
-  ].join('\n');
-}
-
-function routeTable(device: DeviceId, state: SimState) {
-  if (device === 'branch-pc') {
-    return [
-      'default via 192.168.20.1 dev eth0 proto static',
-      '192.168.20.0/24 dev eth0 proto kernel scope link src 192.168.20.45',
-    ].join('\n');
-  }
-
-  if (device === 'br-r1') {
-    return [
-      'Codes: C - connected, L - local, O - OSPF',
-      '',
-      'Gateway of last resort is not set',
-      '',
-      'C    10.0.0.0/30 is directly connected, GigabitEthernet0/0',
-      'L    10.0.0.2/32 is directly connected, GigabitEthernet0/0',
-      'C    192.168.20.0/24 is directly connected, GigabitEthernet0/1',
-      'L    192.168.20.1/32 is directly connected, GigabitEthernet0/1',
-      'O    10.10.10.0/24 [110/2] via 10.0.0.1, 00:00:17, GigabitEthernet0/0',
-    ].join('\n');
-  }
-
-  const branchRoute = hasBranchLanOspf(state)
-    ? ['O    192.168.20.0/24 [110/2] via 10.0.0.2, 00:00:11, GigabitEthernet0/0']
-    : [];
-
-  return [
-    'Codes: C - connected, L - local, O - OSPF',
-    '',
-    'Gateway of last resort is not set',
-    '',
-    'C    10.0.0.0/30 is directly connected, GigabitEthernet0/0',
-    'L    10.0.0.1/32 is directly connected, GigabitEthernet0/0',
-    'C    10.10.10.0/24 is directly connected, GigabitEthernet0/1',
-    'L    10.10.10.1/32 is directly connected, GigabitEthernet0/1',
-    ...branchRoute,
-  ].join('\n');
-}
-
-function ipInterfaceBrief(device: DeviceId) {
-  if (device === 'br-sw1') {
-    return [
-      'Interface              IP-Address      OK? Method Status                Protocol',
-      'Vlan1                  unassigned      YES unset  administratively down down',
-      'Vlan20                 unassigned      YES unset  up                    up',
-      'FastEthernet0/1        unassigned      YES unset  up                    up',
-      'FastEthernet0/3        unassigned      YES unset  up                    up',
-    ].join('\n');
-  }
-
-  if (device === 'br-r1') {
-    return [
-      'Interface              IP-Address      OK? Method Status                Protocol',
-      'GigabitEthernet0/0     10.0.0.2        YES manual up                    up',
-      'GigabitEthernet0/1     192.168.20.1    YES manual up                    up',
-    ].join('\n');
-  }
-
-  return [
-    'Interface              IP-Address      OK? Method Status                Protocol',
-    'GigabitEthernet0/0     10.0.0.1        YES manual up                    up',
-    'GigabitEthernet0/1     10.10.10.1      YES manual up                    up',
-  ].join('\n');
-}
-
-function vlanBrief(state: SimState) {
-  const vlan10Ports = state.branchAccessVlan === 10 ? 'Fa0/3' : '';
-  const vlan20Ports = state.branchAccessVlan === 20 ? 'Fa0/3' : '';
-
-  return [
-    'VLAN Name                             Status    Ports',
-    '---- -------------------------------- --------- -------------------------------',
-    `1    default                          active    Fa0/2, Fa0/4, Fa0/5, Fa0/6`,
-    `10   Guest-Staging                    active    ${vlan10Ports}`,
-    `20   Branch-Users                     active    ${vlan20Ports}`,
-    '99   Network-Management               active',
-  ].join('\n');
-}
-
-function ospfNeighbor() {
-  return [
-    'Neighbor ID     Pri   State           Dead Time   Address         Interface',
-    '1.1.1.1           1   FULL/BDR        00:00:34    10.0.0.1        GigabitEthernet0/0',
-  ].join('\n');
-}
-
-function ospfProtocols(device: DeviceId, state: SimState) {
-  const networks =
-    device === 'br-r1'
-      ? state.brOspfNetworks
-      : ['10.0.0.0 0.0.0.3 area 0', '10.10.10.0 0.0.0.255 area 0'];
-
-  return [
-    'Routing Protocol is "ospf 1"',
-    '  Router ID configured from router-id command',
-    '  Number of areas in this router is 1. 1 normal 0 stub 0 nssa',
-    '  Area BACKBONE(0)',
-    '  Routing for Networks:',
-    ...networks.map((network) => `    ${network}`),
-    '  Routing Information Sources:',
-    '    Gateway         Distance      Last Update',
-    '    10.0.0.1             110      00:00:17',
-  ].join('\n');
-}
-
-function pingOutput(device: DeviceId, target: string, state: SimState) {
-  const health = routeHealth(state);
-  const normalizedTarget = target.trim();
-
-  if (device === 'branch-pc') {
-    if (normalizedTarget === '192.168.20.1') {
-      if (!health.gatewayReachable) {
-        return {
-          output:
-            'PING 192.168.20.1 (192.168.20.1) 56(84) bytes of data.\nFrom 192.168.20.45 icmp_seq=1 Destination Host Unreachable\nFrom 192.168.20.45 icmp_seq=2 Destination Host Unreachable\n\n--- 192.168.20.1 ping statistics ---\n2 packets transmitted, 0 received, +2 errors, 100% packet loss',
-          status: 'error' as const,
-        };
-      }
-      return {
-        output:
-          'PING 192.168.20.1 (192.168.20.1) 56(84) bytes of data.\n64 bytes from 192.168.20.1: icmp_seq=1 ttl=255 time=0.7 ms\n64 bytes from 192.168.20.1: icmp_seq=2 ttl=255 time=0.6 ms\n\n--- 192.168.20.1 ping statistics ---\n2 packets transmitted, 2 received, 0% packet loss',
-      };
-    }
-
-    if (normalizedTarget === '10.10.10.10') {
-      if (!health.gatewayReachable) {
-        return {
-          output:
-            'PING 10.10.10.10 (10.10.10.10) 56(84) bytes of data.\nFrom 192.168.20.45 icmp_seq=1 Destination Host Unreachable\n\nThe local switchport is not placing this host in the routed Branch-Users VLAN.',
-          status: 'error' as const,
-        };
-      }
-      if (!health.hqReturnRoute) {
-        return {
-          output:
-            'PING 10.10.10.10 (10.10.10.10) 56(84) bytes of data.\nRequest timed out.\nRequest timed out.\n\nThe request reaches the WAN, but HQ-R1 has no OSPF route back to 192.168.20.0/24.',
-          status: 'error' as const,
-        };
-      }
-      return {
-        output:
-          'PING 10.10.10.10 (10.10.10.10) 56(84) bytes of data.\n64 bytes from 10.10.10.10: icmp_seq=1 ttl=62 time=8.4 ms\n64 bytes from 10.10.10.10: icmp_seq=2 ttl=62 time=8.1 ms\n64 bytes from 10.10.10.10: icmp_seq=3 ttl=62 time=8.0 ms\n\n--- 10.10.10.10 ping statistics ---\n3 packets transmitted, 3 received, 0% packet loss',
-        state: { ...state, verifiedBranchToHq: true },
-      };
-    }
-  }
-
-  if (isRouter(device) && (normalizedTarget === '10.10.10.10' || normalizedTarget === '192.168.20.45')) {
-    const success =
-      device === 'br-r1'
-        ? normalizedTarget === '10.10.10.10'
-        : normalizedTarget === '192.168.20.45' && health.hqReturnRoute;
-    if (success) {
-      return {
-        output:
-          'Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos, timeout is 2 seconds:\n!!!!!\nSuccess rate is 100 percent (5/5), round-trip min/avg/max = 4/6/8 ms',
-      };
-    }
-  }
-
-  return {
-    output: `PING ${normalizedTarget}: no simulated response for this target in the current lab.`,
-    status: 'error' as const,
-  };
-}
-
-function tracerouteOutput(device: DeviceId, target: string, state: SimState) {
-  const health = routeHealth(state);
-  const normalizedTarget = target.trim();
-
-  if (device !== 'branch-pc' || normalizedTarget !== '10.10.10.10') {
-    return {
-      output: `traceroute to ${normalizedTarget}: target is outside this mission scope.`,
-      status: 'error' as const,
-    };
-  }
-
-  if (!health.gatewayReachable) {
-    return {
-      output:
-        'traceroute to 10.10.10.10, 30 hops max\n 1  * * *\n\nNo first hop. The Branch PC cannot reach its default gateway.',
-      status: 'error' as const,
-    };
-  }
-
-  if (!health.hqReturnRoute) {
-    return {
-      output:
-        'traceroute to 10.10.10.10, 30 hops max\n 1  192.168.20.1  0.7 ms\n 2  10.0.0.1  7.9 ms\n 3  * * *\n\nTraffic arrives at HQ, but replies cannot find the Branch LAN.',
-      status: 'error' as const,
-    };
-  }
-
-  return {
-    output:
-      'traceroute to 10.10.10.10, 30 hops max\n 1  192.168.20.1  0.7 ms\n 2  10.0.0.1  7.6 ms\n 3  10.10.10.10  8.2 ms',
-  };
-}
-
-function runPcCommand(command: string, state: SimState): CommandResult {
-  const cmd = normalizeCommand(command);
-  if (cmd === 'help' || cmd === '?') {
-    return {
-      output:
-        'Supported client commands:\n  ip addr\n  ip route\n  ping 192.168.20.1\n  ping 10.10.10.10\n  traceroute 10.10.10.10',
-      status: 'info',
-    };
-  }
-  if (cmd === 'ip addr' || cmd === 'ip a' || cmd === 'ifconfig') {
-    return {
-      output:
-        '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet 192.168.20.45/24 brd 192.168.20.255 scope global eth0\n    ether 00:50:56:ad:20:45',
-    };
-  }
-  if (cmd === 'ip route' || cmd === 'route -n') {
-    return { output: routeTable('branch-pc', state) };
-  }
-  if (cmd.startsWith('ping ')) return pingOutput('branch-pc', command.trim().slice(5), state);
-  if (cmd.startsWith('traceroute ') || cmd.startsWith('tracepath ')) {
-    const target = command.trim().replace(/^(traceroute|tracepath)\s+/i, '');
-    return tracerouteOutput('branch-pc', target, state);
-  }
-  return {
-    output: `branch-pc: ${command}: command not found`,
-    status: 'error',
-    state: { ...state, badCommands: state.badCommands + 1 },
-  };
-}
-
-function runSwitchCommand(
-  command: string,
-  state: SimState,
-  mode: TerminalMode,
-  currentInterface: string | null,
-): CommandResult {
-  const cmd = normalizeCommand(command);
-
-  if (cmd === 'help' || cmd === '?') {
-    return {
-      output:
-        'Useful BR-SW1 commands:\n  show vlan brief\n  show interfaces fa0/3 switchport\n  show interfaces status\n  show running-config\n  configure terminal\n  interface fa0/3\n  switchport access vlan 20\n  end',
-      status: 'info',
-    };
-  }
-
-  if (mode === 'exec') {
-    const counted = countShowUse(cmd, state);
-    if (cmd === 'show vlan brief' || cmd === 'sh vlan brief') return { output: vlanBrief(state), state: counted };
-    if (
-      cmd === 'show interfaces fa0/3 switchport' ||
-      cmd === 'sh int fa0/3 switchport' ||
-      cmd === 'sh interfaces fa0/3 switchport' ||
-      cmd === 'show int fa0/3 switchport'
-    ) {
-      return {
-        output: [
-          'Name: Fa0/3',
-          'Switchport: Enabled',
-          'Administrative Mode: static access',
-          'Operational Mode: static access',
-          `Access Mode VLAN: ${state.branchAccessVlan} (${state.branchAccessVlan === 20 ? 'Branch-Users' : 'Guest-Staging'})`,
-          'Voice VLAN: none',
-        ].join('\n'),
-        state: counted,
-      };
-    }
-    if (cmd === 'show interfaces status' || cmd === 'sh int status') {
-      return {
-        output: [
-          'Port      Name               Status       Vlan       Duplex Speed Type',
-          'Fa0/1     uplink-BR-R1       connected    trunk      a-full a-100 10/100BaseTX',
-          `Fa0/3     branch-workstation connected    ${state.branchAccessVlan}         a-full a-100 10/100BaseTX`,
-        ].join('\n'),
-        state: counted,
-      };
-    }
-    if (cmd === 'show ip interface brief' || cmd === 'sh ip int br') {
-      return { output: ipInterfaceBrief('br-sw1'), state: counted };
-    }
-    if (cmd === 'show running-config' || cmd === 'show run' || cmd === 'sh run') {
-      return { output: switchRunningConfig(state), state: counted };
-    }
-    if (cmd === 'configure terminal' || cmd === 'conf t') {
-      return { output: 'Enter configuration commands, one per line. End with CNTL/Z.', nextMode: 'config' };
-    }
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  if (mode === 'config') {
-    if (cmd === 'end') return { output: '', nextMode: 'exec' };
-    if (cmd === 'exit') return { output: '', nextMode: 'exec' };
-    if (cmd === 'interface fa0/3' || cmd === 'int fa0/3' || cmd === 'interface fastethernet0/3') {
-      return { output: '', nextMode: 'interface', nextInterface: 'FastEthernet0/3' };
-    }
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  if (mode === 'interface') {
-    if (cmd === 'end') return { output: '', nextMode: 'exec', nextInterface: null };
-    if (cmd === 'exit') return { output: '', nextMode: 'config', nextInterface: null };
-    if (currentInterface !== 'FastEthernet0/3') {
-      return { output: '% This mission only exposes Fa0/3 for switchport changes.', status: 'error' };
-    }
-    if (cmd === 'switchport mode access') return { output: '' };
-    if (cmd === 'switchport access vlan 20') {
-      return {
-        output: 'BR-SW1: Fa0/3 moved to VLAN 20 (Branch-Users). Link will forward to the routed branch gateway.',
-        state: { ...state, branchAccessVlan: 20 },
-      };
-    }
-    if (cmd.startsWith('switchport access vlan ')) {
-      const vlan = Number(cmd.replace('switchport access vlan ', ''));
-      if (Number.isFinite(vlan)) {
-        return {
-          output: `% VLAN ${vlan} does not satisfy this ticket. Branch users belong in VLAN 20.`,
-          status: 'error',
-          state: { ...state, branchAccessVlan: vlan, badCommands: state.badCommands + 1 },
-        };
-      }
-    }
-    if (cmd === 'no shutdown') return { output: '' };
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-}
-
-function runRouterCommand(
-  device: DeviceId,
-  command: string,
-  state: SimState,
-  mode: TerminalMode,
-): CommandResult {
-  const cmd = normalizeCommand(command);
-
-  if (cmd === 'help' || cmd === '?') {
-    return {
-      output:
-        'Useful router commands:\n  show ip interface brief\n  show ip route\n  show ip ospf neighbor\n  show ip protocols\n  show running-config\n  configure terminal\n  router ospf 1\n  network 192.168.20.0 0.0.0.255 area 0\n  end\n  ping 10.10.10.10',
-      status: 'info',
-    };
-  }
-
-  if (mode === 'exec') {
-    const counted = countShowUse(cmd, state);
-    if (cmd === 'show ip interface brief' || cmd === 'sh ip int br') {
-      return { output: ipInterfaceBrief(device), state: counted };
-    }
-    if (cmd === 'show ip route' || cmd === 'sh ip route') return { output: routeTable(device, state), state: counted };
-    if (cmd === 'show ip ospf neighbor' || cmd === 'sh ip ospf neigh' || cmd === 'sh ip ospf neighbor') {
-      return { output: ospfNeighbor(), state: counted };
-    }
-    if (cmd === 'show ip protocols' || cmd === 'sh ip protocols') {
-      return { output: ospfProtocols(device, state), state: counted };
-    }
-    if (cmd === 'show running-config' || cmd === 'show run' || cmd === 'sh run') {
-      return { output: routerRunningConfig(device, state), state: counted };
-    }
-    if (cmd === 'configure terminal' || cmd === 'conf t') {
-      return { output: 'Enter configuration commands, one per line. End with CNTL/Z.', nextMode: 'config' };
-    }
-    if (cmd.startsWith('ping ')) return pingOutput(device, command.trim().slice(5), state);
-    if (cmd.startsWith('traceroute ') || cmd.startsWith('trace ')) {
-      const target = command.trim().replace(/^(traceroute|trace)\s+/i, '');
-      return tracerouteOutput(device, target, state);
-    }
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  if (mode === 'config') {
-    if (cmd === 'end') return { output: '', nextMode: 'exec' };
-    if (cmd === 'exit') return { output: '', nextMode: 'exec' };
-    if (cmd === 'router ospf 1') {
-      return { output: '', nextMode: 'router-ospf' };
-    }
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  if (mode === 'router-ospf') {
-    if (cmd === 'end') return { output: '', nextMode: 'exec' };
-    if (cmd === 'exit') return { output: '', nextMode: 'config' };
-    if (device !== 'br-r1') {
-      return {
-        output: '% HQ-R1 is already advertising the HQ networks. The missing route is on BR-R1.',
-        status: 'error',
-        state: { ...state, badCommands: state.badCommands + 1 },
-      };
-    }
-    if (cmd === 'network 192.168.20.0 0.0.0.255 area 0') {
-      const networks = state.brOspfNetworks.includes('192.168.20.0 0.0.0.255 area 0')
-        ? state.brOspfNetworks
-        : [...state.brOspfNetworks, '192.168.20.0 0.0.0.255 area 0'];
-      return {
-        output: 'OSPF: BR-R1 is now advertising 192.168.20.0/24 into area 0.',
-        state: { ...state, brOspfNetworks: networks },
-      };
-    }
-    if (cmd.startsWith('network ')) {
-      return {
-        output:
-          '% Network statement accepted by syntax, but it does not match the Branch LAN needed for this ticket.',
-        status: 'error',
-        state: { ...state, badCommands: state.badCommands + 1 },
-      };
-    }
-    return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-  }
-
-  return { output: invalidCisco(command), status: 'error', state: { ...state, badCommands: state.badCommands + 1 } };
-}
-
-function runCommand(
-  device: DeviceId,
-  command: string,
-  state: SimState,
-  mode: TerminalMode,
-  currentInterface: string | null,
-): CommandResult {
-  if (device === 'branch-pc') return runPcCommand(command, state);
-  if (isSwitch(device)) return runSwitchCommand(command, state, mode, currentInterface);
-  if (isRouter(device)) return runRouterCommand(device, command, state, mode);
-  return { output: 'Unknown simulated device.', status: 'error' };
-}
+import { deviceLabels, initialState, starterHistory, isRouter, routeHealth, promptFor, runCommand, commandHelp, completeCommand, configurationDiff } from './network-simulator';
+import type { DeviceId, TerminalMode, SimState, TerminalEntry } from './network-simulator';
 
 function mastery(state: SimState) {
   const health = routeHealth(state);
@@ -692,11 +69,14 @@ function explainFix(state: SimState) {
     return 'The branch workstation is now in VLAN 20, so it can reach 192.168.20.1. BR-R1 also advertises 192.168.20.0/24 in OSPF, so HQ-R1 has a return route. The ping succeeds because both forward and return paths exist.';
   }
   if (!health.accessVlanOk) {
-    return 'The PC address is valid for 192.168.20.0/24, but the switchport is still in VLAN 10. That keeps the host away from its default gateway.';
+    return `The PC address is valid for 192.168.20.0/24. Check Fa0/3: it is in VLAN ${state.branchAccessVlan} with ${state.portModes['FastEthernet0/3']} mode. The workstation needs an access port in VLAN 20.`;
   }
+  if (!health.gatewayReachable) return 'Check the switch uplink and interface status. Fa0/1 needs access VLAN 20 to reach the untagged routed port on BR-R1, and the local interfaces must be up.';
+  if (!health.ospfNeighborFull) return 'The WAN OSPF adjacency is down. Check interface status and matching OSPF area assignments on both routers.';
   if (!health.branchLanAdvertised) {
     return 'Layer 2 is fixed. The remaining issue is routing: HQ-R1 still lacks an OSPF route back to 192.168.20.0/24.';
   }
+  if (!health.hqRoute) return 'The branch is reachable, but the HQ service network is not. Check HQ-R1 interface status and the OSPF advertisement for 10.10.10.0/24.';
   return 'The network state looks fixed. Verify it from the Branch PC with ping 10.10.10.10 to close the ticket.';
 }
 
@@ -1148,121 +528,120 @@ function SubnetPanel({
       </div>
 
       <p className="subnet-note">
-        The PC address is valid. The failure is that Fa0/3 is in VLAN {state.branchAccessVlan}, so the
-        host is not actually attached to the 192.168.20.0/24 broadcast domain.
+        {routeHealth(state).gatewayReachable
+          ? 'The PC and its gateway share the VLAN 20 broadcast domain. Traffic to other subnets can now reach the router.'
+          : `The PC address is valid. Check Fa0/3 (VLAN ${state.branchAccessVlan}), the uplink VLAN, and interface status to reach 192.168.20.1.`}
       </p>
     </div>
   );
 }
 
-function TerminalPanel({
-  activeDevice,
-  setActiveDevice,
-  state,
-  setState,
-}: {
+
+type TerminalSession = {
+  mode: TerminalMode;
+  currentInterface: string | null;
+  command: string;
+  history: TerminalEntry[];
+  recalled: number | null;
+  draft: string;
+};
+type Sessions = Record<DeviceId, TerminalSession>;
+function newSessions(): Sessions {
+  return Object.fromEntries(Object.keys(deviceLabels).map((id) => [id, { mode: 'exec', currentInterface: null, command: '', history: [...starterHistory], recalled: null, draft: '' }])) as Sessions;
+}
+
+function TerminalPanel({ activeDevice, setActiveDevice, state, setState, sessions, setSessions }: {
   activeDevice: DeviceId;
   setActiveDevice: (device: DeviceId) => void;
   state: SimState;
   setState: Dispatch<SetStateAction<SimState>>;
+  sessions: Sessions;
+  setSessions: Dispatch<SetStateAction<Sessions>>;
 }) {
-  const [command, setCommand] = useState('');
-  const [mode, setMode] = useState<TerminalMode>('exec');
-  const [currentInterface, setCurrentInterface] = useState<string | null>(null);
-  const [history, setHistory] = useState<TerminalEntry[]>(starterHistory);
+  const session = sessions[activeDevice];
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const prompt = promptFor(activeDevice, session.mode);
+  const patchSession = (patch: Partial<TerminalSession>) => setSessions((current) => ({ ...current, [activeDevice]: { ...current[activeDevice], ...patch } }));
 
+  useEffect(() => { inputRef.current?.focus({ preventScroll: true }); }, [activeDevice]);
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [history]);
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [session.history]);
 
-  const prompt = promptFor(activeDevice, mode);
-
-  const changeDevice = (device: DeviceId) => {
-    setActiveDevice(device);
-    setMode('exec');
-    setCurrentInterface(null);
-    setHistory((items) => [
-      ...items,
-      {
-        prompt: 'console',
-        command: `connect ${deviceLabels[device]}`,
-        output: `Out-of-band console attached to ${deviceLabels[device]} (${deviceKinds[device]}).`,
-        status: 'info',
-      },
-    ]);
+  const execute = (lines: string[], remainder = '') => {
+    let nextState = state;
+    const nextSession = { ...session };
+    for (const line of lines) {
+      const command = line.trim();
+      if (!command) continue;
+      if (activeDevice === 'branch-pc' && command === 'clear') { nextSession.history = []; continue; }
+      const result = runCommand(activeDevice, command, nextState, nextSession.mode, nextSession.currentInterface);
+      nextSession.history = [...nextSession.history, { prompt: promptFor(activeDevice, nextSession.mode), command, output: result.output, status: result.status ?? 'ok' }];
+      nextState = result.state ?? nextState;
+      if (result.nextMode) nextSession.mode = result.nextMode;
+      if ('nextInterface' in result) nextSession.currentInterface = result.nextInterface ?? null;
+    }
+    setState(nextState);
+    setSessions((current) => ({ ...current, [activeDevice]: { ...nextSession, command: remainder, recalled: null, draft: '' } }));
+    inputRef.current?.focus({ preventScroll: true });
   };
 
-  const submitCommand = (event: { preventDefault: () => void }) => {
-    event.preventDefault();
-    const trimmed = command.trim();
-    if (!trimmed) return;
-
-    if (normalizeCommand(trimmed) === 'clear') {
-      setHistory([]);
-      setCommand('');
-      return;
-    }
-
-    const result = runCommand(activeDevice, trimmed, state, mode, currentInterface);
-    const nextState = result.state ?? state;
-    setState(nextState);
-    if (result.nextMode) setMode(result.nextMode);
-    if ('nextInterface' in result) setCurrentInterface(result.nextInterface ?? null);
-    setHistory((items) => [
-      ...items,
-      {
-        prompt,
-        command: trimmed,
-        output: result.output,
-        status: result.status ?? 'ok',
-      },
-    ]);
-    setCommand('');
+  const recall = (direction: -1 | 1) => {
+    const commands = session.history.filter((entry) => entry.prompt.startsWith(deviceLabels[activeDevice]) || entry.prompt === 'branch-pc$').filter((entry) => !entry.command.endsWith('?')).map((entry) => entry.command);
+    const index = Math.max(0, Math.min(commands.length, (session.recalled ?? commands.length) + direction));
+    const draft = session.recalled === null ? session.command : session.draft;
+    patchSession({ command: commands[index] ?? draft, recalled: index === commands.length ? null : index, draft });
   };
 
   return (
     <div className="terminal-panel">
       <div className="device-bar" aria-label="Console device selector">
         {(Object.keys(deviceLabels) as DeviceId[]).map((device) => (
-          <Button
-            key={device}
-            type="button"
-            variant={activeDevice === device ? 'default' : 'secondary'}
-            size="sm"
-            onClick={() => changeDevice(device)}
-          >
+          <Button key={device} type="button" variant={activeDevice === device ? 'default' : 'secondary'} size="sm" aria-pressed={activeDevice === device} onClick={() => { setActiveDevice(device); inputRef.current?.focus({ preventScroll: true }); }}>
             {isRouter(device) ? <Network aria-hidden="true" /> : device === 'br-sw1' ? <Cable aria-hidden="true" /> : <Cpu aria-hidden="true" />}
             {deviceLabels[device]}
           </Button>
         ))}
       </div>
-
-      <div className="terminal-output" ref={scrollRef} aria-live="polite">
-        {history.map((item, index) => (
-          <div key={`${item.prompt}-${item.command}-${index}`} className={`terminal-entry ${item.status}`}>
-            <div className="terminal-command">
-              <span>{item.prompt}</span>
-              <strong>{item.command}</strong>
-            </div>
+      <div className="terminal-output" ref={scrollRef} role="log" aria-label="Device terminal output" aria-live="polite">
+        {session.history.map((item, index) => (
+          <div key={`${item.prompt}-${index}`} className={`terminal-entry ${item.status}`}>
+            <div className="terminal-command"><span>{item.prompt}</span><strong>{item.command}</strong></div>
             {item.output ? <pre>{item.output}</pre> : null}
           </div>
         ))}
       </div>
-
-      <form className="terminal-form" onSubmit={submitCommand}>
+      <form className="terminal-form" onSubmit={(event) => { event.preventDefault(); execute([session.command]); }}>
         <label htmlFor="terminal-command">{prompt}</label>
-        <input
-          id="terminal-command"
-          value={command}
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(event) => setCommand(event.target.value)}
-          placeholder="Type a command"
-        />
-        <Button type="submit" size="icon-lg" aria-label="Run command">
-          <Play aria-hidden="true" />
-        </Button>
+        <input id="terminal-command" ref={inputRef} value={session.command} spellCheck={false} autoComplete="off" autoCapitalize="none" autoCorrect="off" enterKeyHint="send"
+          onChange={(event) => patchSession({ command: event.target.value, recalled: null })}
+          onPaste={(event) => {
+            const pasted = event.clipboardData.getData('text').replace(/\r\n?/g, '\n');
+            if (!pasted.includes('\n')) return;
+            event.preventDefault();
+            const input = event.currentTarget;
+            const text = session.command.slice(0, input.selectionStart ?? 0) + pasted + session.command.slice(input.selectionEnd ?? session.command.length);
+            const lines = text.split('\n');
+            const remainder = lines.pop() ?? '';
+            execute(lines, remainder);
+          }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            if (event.key === 'ArrowUp' || (event.ctrlKey && event.key.toLowerCase() === 'p')) { event.preventDefault(); recall(-1); }
+            else if (event.key === 'ArrowDown' || (event.ctrlKey && event.key.toLowerCase() === 'n')) { event.preventDefault(); recall(1); }
+            else if (event.key === 'Tab' && !event.shiftKey) { event.preventDefault(); patchSession({ command: completeCommand(activeDevice, session.mode, session.command) }); }
+            else if (event.key === '?' && activeDevice !== 'branch-pc') {
+              event.preventDefault();
+              patchSession({ history: [...session.history, { prompt, command: session.command + '?', output: commandHelp(activeDevice, session.mode, session.command + '?'), status: 'info' }] });
+            } else if (event.ctrlKey && event.key.toLowerCase() === 'z') {
+              event.preventDefault(); patchSession({ mode: activeDevice !== 'branch-pc' ? 'exec' : session.mode, currentInterface: null, command: '' });
+            } else if (event.ctrlKey && event.key.toLowerCase() === 'c') {
+              if (window.getSelection()?.toString()) return;
+              event.preventDefault(); patchSession({ command: '', mode: session.mode === 'user-exec' ? 'user-exec' : 'exec', currentInterface: null });
+            } else if (event.ctrlKey && event.key.toLowerCase() === 'l') { event.preventDefault(); patchSession({ history: [] }); }
+          }} placeholder="Type a command" />
+        <Button type="submit" size="icon-lg" aria-label="Run command"><Play aria-hidden="true" /></Button>
       </form>
     </div>
   );
@@ -1312,29 +691,18 @@ function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void
 }
 
 function DiffPanel({ state }: { state: SimState }) {
-  const vlanFixed = isVlanFixed(state);
-  const ospfFixed = hasBranchLanOspf(state);
-
   return (
     <div className="diff-panel">
       <div className="panel-heading">
         <Command aria-hidden="true" />
         <div>
           <h2>Running Diff</h2>
-          <p>Only confirmed simulator changes appear here.</p>
+          <p>Changes from the initial device configuration.</p>
         </div>
       </div>
 
       <pre className="diff-output">
-        {!vlanFixed && !ospfFixed
-          ? '# No approved changes yet'
-          : [
-              vlanFixed ? '- switchport access vlan 10' : null,
-              vlanFixed ? '+ switchport access vlan 20' : null,
-              ospfFixed ? '+ network 192.168.20.0 0.0.0.255 area 0' : null,
-            ]
-              .filter(Boolean)
-              .join('\n')}
+        {configurationDiff(state)}
       </pre>
     </div>
   );
@@ -1387,6 +755,7 @@ function ConsoleOverlay({
   setState: Dispatch<SetStateAction<SimState>>;
 }) {
   const [activeDevice, setActiveDevice] = useState<DeviceId>('branch-pc');
+  const [sessions, setSessions] = useState<Sessions>(newSessions);
   const handleViewedSubnet = useCallback(() => {
     setState((current) => (current.viewedSubnet ? current : { ...current, viewedSubnet: true }));
   }, [setState]);
@@ -1413,6 +782,7 @@ function ConsoleOverlay({
               onReset={() => {
                 setState(initialState);
                 setActiveDevice('branch-pc');
+                setSessions(newSessions());
               }}
             />
             <SubnetPanel state={state} onViewed={handleViewedSubnet} />
@@ -1425,6 +795,8 @@ function ConsoleOverlay({
               setActiveDevice={setActiveDevice}
               state={state}
               setState={setState}
+              sessions={sessions}
+              setSessions={setSessions}
             />
           </div>
 
@@ -1442,7 +814,10 @@ export default function NetworkGame() {
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [state, setState] = useState<SimState>(initialState);
   const health = useMemo(() => routeHealth(state), [state]);
-  const openConsole = useCallback(() => setConsoleOpen(true), []);
+  const openConsole = useCallback(() => {
+    if (document.pointerLockElement) document.exitPointerLock();
+    setConsoleOpen(true);
+  }, []);
 
   return (
     <main className="game-root">

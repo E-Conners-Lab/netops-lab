@@ -371,8 +371,8 @@ input {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   width: min(1480px, 100%);
-  height: min(930px, 100%);
-  overflow: hidden;
+  height: min(930px, calc(100dvh - 36px));
+  overflow: clip;
   border: 1px solid rgb(170 219 209 / 28%);
   border-radius: 8px;
   background: rgb(8 16 18 / 93%);
@@ -417,6 +417,7 @@ input {
   grid-template-columns: minmax(260px, 0.82fr) minmax(430px, 1.5fr) minmax(280px, 0.86fr);
   gap: 12px;
   min-height: 0;
+  overflow: auto;
   padding: 12px;
 }
 
@@ -426,6 +427,7 @@ input {
   display: grid;
   gap: 12px;
   min-height: 0;
+  overflow: auto;
 }
 
 .console-left {
@@ -741,6 +743,8 @@ input {
 }
 
 .terminal-output {
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: 12px;
   background:
@@ -784,6 +788,10 @@ input {
 
 .terminal-entry.error pre {
   color: #ffb5b5;
+}
+
+.terminal-entry pre {
+  white-space: pre;
 }
 
 .terminal-entry.info pre {
@@ -907,6 +915,7 @@ input {
     display: flex;
     flex-direction: column;
     min-height: auto;
+    overflow: visible;
   }
 
   .terminal-panel {
@@ -945,6 +954,10 @@ input {
 
   .console-overlay {
     padding: 8px;
+  }
+
+  .console-shell {
+    height: calc(100dvh - 16px);
   }
 
   .console-header {
