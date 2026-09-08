@@ -3,6 +3,8 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { createCableStation } from './cable-station';
+import type { SimState } from './network-simulator';
 
 type Point = [number, number, number];
 type Health = { accessVlanOk: boolean; branchLanAdvertised: boolean; endToEnd: boolean; gatewayReachable: boolean; ospfNeighborFull: boolean; hqReturnRoute: boolean };
@@ -237,7 +239,7 @@ export function createNetworkRoom(scene: THREE.Scene, renderer: THREE.WebGLRende
       box([0.022, 2.31, 1.03], [x + dx, 1.36, z], graphite, 0.004);
       for (let slat = 0; slat < 15; slat++) box([0.027, 0.014, 0.58], [x + dx * 1.003, 0.62 + slat * 0.09, z], black);
     }
-    for (let u = 0; u < 4; u++) {
+    for (let u = 0; u < (index === 0 ? 0 : 4); u++) {
       const y = 2.32 - u * 0.27;
       box([1.02, 0.16, 0.82], [x, y, z + 0.07], u === 2 ? silver : graphite, 0.009);
       panel(portScale, [0.9, 0.032], [x, y + 0.059, front + 0.013]);
@@ -277,19 +279,22 @@ export function createNetworkRoom(scene: THREE.Scene, renderer: THREE.WebGLRende
   rack(3.55, -1.2, '02 / EDGE ROUTING', 1);
   rack(-3.55, -4.5, '03 / CORE SERVICES', 2);
   rack(3.55, -4.5, '04 / COMPUTE', 3);
+  const station = createCableStation();
+  station.group.position.set(-3.55, 1.92, -0.56);
+  scene.add(station.group);
 
   // The monitor graphics are real canvas textures, legible when approached.
   const dashboard = texture(1536, 768, () => {});
-  function drawDashboard(health: Health, time: number) {
+  function drawDashboard(health: Health, time: number, ticket = 'NOC-1047', carrier = true) {
     const ctx = dashboard.ctx;
     ctx.fillStyle = '#07131c'; ctx.fillRect(0, 0, 1536, 768);
     ctx.fillStyle = '#9cb2bd'; ctx.font = '22px monospace'; ctx.fillText('NETWORK OPERATIONS / LIVE', 56, 60);
     ctx.fillStyle = '#e7f1f3'; ctx.font = '42px sans-serif'; ctx.fillText('Branch connectivity', 56, 123);
-    ctx.fillStyle = health.endToEnd ? '#62dbb0' : '#edb861'; ctx.font = '23px monospace'; ctx.fillText(health.endToEnd ? 'ALL SYSTEMS OPERATIONAL' : 'INCIDENT NOC-1047 / ACTIVE', 56, 171);
+    ctx.fillStyle = health.endToEnd ? '#62dbb0' : '#edb861'; ctx.font = '23px monospace'; ctx.fillText(health.endToEnd ? 'ALL SYSTEMS OPERATIONAL' : `INCIDENT ${ticket} / ACTIVE`, 56, 171);
     const xs = [140, 550, 960, 1390];
     const names = ['BRANCH PC', 'BR-SW1', 'BR-R1', 'HQ-R1'];
     for (let i = 0; i < 3; i++) {
-      ctx.strokeStyle = (i === 0 ? health.accessVlanOk : i === 1 ? health.gatewayReachable : health.ospfNeighborFull) ? '#4bad9d' : '#e6a75b';
+      ctx.strokeStyle = (i === 0 ? health.accessVlanOk && carrier : i === 1 ? health.gatewayReachable : health.ospfNeighborFull) ? '#4bad9d' : '#e6a75b';
       ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(xs[i] + 38, 313); ctx.lineTo(xs[i + 1] - 38, 313); ctx.stroke();
       const px = xs[i] + 45 + ((time * 0.18 + i * 0.3) % 1) * (xs[i + 1] - xs[i] - 90);
       ctx.fillStyle = '#c5f2e3'; ctx.fillRect(px, 307, 13, 13);
@@ -337,11 +342,11 @@ export function createNetworkRoom(scene: THREE.Scene, renderer: THREE.WebGLRende
   }
   panel(dashboard.map, [1.13, 0.645], [-0.64, 1.47, -2.353], true);
   const terminal = texture(1024, 576, () => {});
-  function drawTerminal(health: Health) {
+  function drawTerminal(health: Health, ticket: string) {
     const ctx = terminal.ctx;
     ctx.fillStyle = '#091319'; ctx.fillRect(0, 0, 1024, 576);
     ctx.fillStyle = '#8bcdb4'; ctx.font = '26px monospace';
-    ['NOC-1047 / PATH DIAGNOSTICS', '', `Branch gateway   ${health.gatewayReachable ? 'REACHABLE' : 'UNREACHABLE'}`, `OSPF neighbor    ${health.ospfNeighborFull ? 'FULL' : 'DOWN'}`, `HQ return route  ${health.hqReturnRoute ? 'LEARNED' : 'MISSING'}`, '', `End-to-end       ${health.endToEnd ? 'REACHABLE' : 'BLOCKED'}`, '', 'BR-R1# _'].forEach((line, i) => ctx.fillText(line, 35, 57 + i * 46));
+    [`${ticket} / PATH DIAGNOSTICS`, '', `Branch gateway   ${health.gatewayReachable ? 'REACHABLE' : 'UNREACHABLE'}`, `OSPF neighbor    ${health.ospfNeighborFull ? 'FULL' : 'DOWN'}`, `HQ return route  ${health.hqReturnRoute ? 'LEARNED' : 'MISSING'}`, '', `End-to-end       ${health.endToEnd ? 'REACHABLE' : 'BLOCKED'}`, '', 'BR-R1# _'].forEach((line, i) => ctx.fillText(line, 35, 57 + i * 46));
     terminal.map.needsUpdate = true;
   }
   panel(terminal.map, [1.13, 0.645], [0.64, 1.47, -2.353], true);
@@ -417,23 +422,27 @@ export function createNetworkRoom(scene: THREE.Scene, renderer: THREE.WebGLRende
   let lastScreenFrame = -1;
   let lastHealth = '';
   return {
+    hitStation: (ray: THREE.Raycaster) => station.intersects(ray),
     consoleTarget: new THREE.Vector3(0, 0, -1.6),
     canStandAt(x: number, z: number) {
       return Math.abs(x) < 5.65 && z > -7.1 && z < 7.3 && !obstacles.some((o) => x > o.min.x && x < o.max.x && z > o.min.z && z < o.max.z);
     },
-    update(health: Health, elapsed: number) {
+    update(health: Health, elapsed: number, state: SimState) {
+      station.update(state);
       pulseLights[0].material = health.accessVlanOk ? green : red;
       pulseLights[1].material = health.branchLanAdvertised ? green : amber;
       pulseLights.forEach((light, i) => light.scale.setScalar(0.84 + Math.sin(elapsed * 3 + i) * 0.16));
       const key = `${health.accessVlanOk},${health.branchLanAdvertised},${health.endToEnd},${health.gatewayReachable},${health.ospfNeighborFull},${health.hqReturnRoute}`;
       if (Math.floor(elapsed * 6) !== lastScreenFrame || key !== lastHealth) {
-        drawDashboard(health, elapsed);
-        if (key !== lastHealth) drawTerminal(health);
+        const ticket = state.missionId === 'cabling' ? 'NOC-1048' : 'NOC-1047';
+        drawDashboard(health, elapsed, ticket, state.cablePort !== null && state.cablePort !== 'console');
+        drawTerminal(health, ticket);
         lastScreenFrame = Math.floor(elapsed * 6);
         lastHealth = key;
       }
     },
     dispose() {
+      station.dispose();
       scene.environment = null;
       environmentTarget.dispose();
       scene.traverse((object) => { if (object instanceof THREE.Mesh) object.geometry.dispose(); });

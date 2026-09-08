@@ -11,9 +11,41 @@ export type MissionGuidance = {
   commands: string[];
   expected: string;
   configure?: boolean;
+  total?: number;
+  physical?: boolean;
 };
 
 export function missionGuidance(state: SimState, health: Health): MissionGuidance {
+  if (state.missionId !== 'cabling') return configurationGuidance(state, health);
+  const base = {device: 'br-sw1' as const, total: 4, commands: []};
+  if (!state.observations.includes('physical-port')) return {
+    ...base, id: 'physical-inspect', step: 1, physical: true, title: 'Trace the patch lead',
+    objective: 'Inspect rack 01 and locate the blue lead from PP-03, the workstation circuit.',
+    clue: 'A connector that fits is not necessarily carrying the right signal. Compare the port label with the patch schedule.',
+    expected: 'Identify where PP-03 terminates on BR-SW1.',
+  };
+  if (state.cablePort !== 'FastEthernet0/3') return {
+    ...base, id: 'physical-patch', step: 2, physical: true, title: 'Restore the physical path',
+    objective: 'Move the PP-03 patch lead to its assigned Ethernet port, Fa0/3.',
+    clue: 'The console port carries serial management data, not Ethernet. Disconnect the lead before connecting it to Fa0/3. Fa0/1 is the occupied gateway uplink; Fa0/2 belongs to VLAN 10.',
+    expected: 'PP-03 terminates at Fa0/3 and its link LED comes on.',
+  };
+  if (health.endToEnd && state.verifiedBranchToHq) return {
+    ...base, id: 'complete', step: 4, title: 'Physical path restored',
+    objective: 'The patch matches the schedule and the workstation can reach HQ.',
+    clue: 'RJ-45 describes the connector, not the service. Moving the lead from serial console to Ethernet restored carrier. Testing from the workstation then verified the whole path, not just the port LED.',
+    expected: 'Ticket NOC-1048 closed.',
+  };
+  if (health.endToEnd) return {
+    ...base, id: 'physical-verify', step: 4, device: 'branch-pc', title: 'Prove the repair',
+    objective: 'Check carrier on the workstation, then test HQ from the original source.',
+    clue: 'A link LED proves a physical connection, not end-to-end reachability. The ping checks the forward and return paths.',
+    commands: ['ip addr', 'ping 10.10.10.10'], expected: 'eth0 is UP with LOWER_UP; replies arrive from 10.10.10.10.',
+  };
+  return {...configurationGuidance(state,health), step: 3, total: 4};
+}
+
+function configurationGuidance(state: SimState, health: Health): MissionGuidance {
   const saw = (id: SimState['observations'][number]) => state.observations.includes(id);
   if (health.endToEnd && state.verifiedBranchToHq) return {
     id: 'complete', step: 7, title: 'Branch restored', device: 'branch-pc',
@@ -35,6 +67,12 @@ export function missionGuidance(state: SimState, health: Health): MissionGuidanc
       clue: `${iface} is shut down. A correct VLAN or route cannot carry traffic across an interface that is disabled.`,
       configure: true, commands: ['configure terminal', `interface ${iface}`, 'no shutdown', 'end'], expected: 'The interface returns to up/up, and its physical link recovers.' };
   }
+  if (!health.carrier) return {
+    id: 'physical-recovery', step: 2, title: 'Recover the workstation link', device: 'br-sw1', physical: true,
+    objective: 'The workstation has no Ethernet carrier. Inspect the patch lead from PP-03.',
+    clue: 'PP-03 should terminate at Fa0/3. A disconnected lead or a serial console connection cannot carry workstation Ethernet traffic.',
+    commands: [], expected: 'Restore the physical connection before continuing with VLAN and routing checks.',
+  };
   if (!health.accessVlanOk && !saw('access-vlan')) return {
     id: 'inspect-access', step: 2, title: 'Follow the first cable', device: 'br-sw1',
     objective: 'Find the VLAN assigned to the workstation port, Fa0/3.',

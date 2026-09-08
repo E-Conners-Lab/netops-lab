@@ -1,8 +1,17 @@
 export type DeviceId = 'branch-pc' | 'br-sw1' | 'br-r1' | 'hq-r1';
 export type TerminalMode = 'user-exec' | 'exec' | 'config' | 'interface' | 'router-ospf';
-export type Observation = 'pc-address' | 'pc-route' | 'access-vlan' | 'gateway-test' | 'return-route';
+export type MissionId = 'branch' | 'cabling';
+export type CablePort = 'console' | 'FastEthernet0/2' | 'FastEthernet0/3';
+export type Observation = 'pc-address' | 'pc-route' | 'access-vlan' | 'gateway-test' | 'return-route' | 'physical-port';
+
+export const missions = {
+  branch: { ticket: 'NOC-1047', title: 'Bring the Branch Online', summary: 'Restore the access VLAN and OSPF return route, then verify connectivity from the branch workstation.', topics: 'VLANs / OSPF / Troubleshooting' },
+  cabling: { ticket: 'NOC-1048', title: 'The Misplaced Patch Lead', summary: 'Desk B-03 lost Ethernet after a rack tidy-up. Trace its patch lead from PP-03 to the assigned switch port, Fa0/3, then verify HQ reachability.', topics: 'Physical layer / Port identification / Verification' },
+};
 
 export type SimState = {
+  missionId: MissionId;
+  cablePort: CablePort | null;
   branchAccessVlan: number;
   brOspfNetworks: string[];
   hqOspfNetworks: string[];
@@ -48,12 +57,14 @@ export const deviceKinds: Record<DeviceId, string> = {
 };
 
 export const initialState: SimState = {
+  missionId: 'branch',
+  cablePort: 'FastEthernet0/3',
   branchAccessVlan: 10,
   brOspfNetworks: ['10.0.0.0 0.0.0.3 area 0'],
   hqOspfNetworks: ['10.0.0.0 0.0.0.3 area 0', '10.10.10.0 0.0.0.255 area 0'],
   shutdownInterfaces: [],
-  portModes: { 'FastEthernet0/1': 'access', 'FastEthernet0/3': 'access' },
-  portVlans: { 'FastEthernet0/1': 20, 'FastEthernet0/3': 10 },
+  portModes: { 'FastEthernet0/1': 'access', 'FastEthernet0/2': 'access', 'FastEthernet0/3': 'access' },
+  portVlans: { 'FastEthernet0/1': 20, 'FastEthernet0/2': 10, 'FastEthernet0/3': 10 },
   descriptions: {},
   startupConfigs: {},
   verifiedBranchToHq: false,
@@ -62,6 +73,39 @@ export const initialState: SimState = {
   badCommands: 0,
   observations: [],
 };
+
+export function initialMissionState(id: MissionId): SimState {
+  const state = structuredClone(initialState);
+  if (id === 'cabling') {
+    state.missionId = id;
+    state.cablePort = 'console';
+    state.branchAccessVlan = state.portVlans['FastEthernet0/3'] = 20;
+    state.brOspfNetworks.push('192.168.20.0 0.0.0.255 area 0');
+  }
+  return state;
+}
+
+export function missionComplete(state: SimState) {
+  return state.verifiedBranchToHq && routeHealth(state).endToEnd && (state.missionId === 'branch' || (state.cablePort === 'FastEthernet0/3' && state.observations.includes('physical-port')));
+}
+
+export function patchCable(state: SimState, port: CablePort | 'FastEthernet0/1' | null): CommandResult {
+  if (port === 'FastEthernet0/1') return { output: 'Fa0/1 is occupied by the router uplink. Leave that circuit in service.', status: 'error' };
+  if (port !== null && !['console', 'FastEthernet0/2', 'FastEthernet0/3'].includes(port)) return { output: 'Unknown port.', status: 'error' };
+  if (state.cablePort === port) return { output: 'The cable is already in that position.', status: 'info' };
+  if (state.cablePort !== null && port !== null) return { output: 'Disconnect the patch lead before moving it to another port.', status: 'error' };
+  return { state: { ...state, cablePort: port, verifiedBranchToHq: false, observations: state.observations.filter((item) => item !== 'gateway-test') }, output: port === null ? 'PP-03 patch lead disconnected.' : port === 'console' ? 'Connected to Console. This is a serial management port, not Ethernet; the workstation has no carrier.' : `PP-03 connected to ${port.replace('FastEthernet', 'Fa')}. Verify the link from the workstation.`, status: 'info' };
+}
+
+export function interfaceUp(device: DeviceId, iface: string, state: SimState): boolean {
+  if (state.shutdownInterfaces.includes(`${device}:${iface}`)) return false;
+  if (device === 'branch-pc') return state.cablePort !== null && state.cablePort !== 'console' && interfaceUp('br-sw1', state.cablePort, state);
+  if (device === 'br-sw1' && iface !== 'FastEthernet0/1') return state.cablePort === iface;
+  if (device === 'br-sw1') return !state.shutdownInterfaces.includes('br-r1:GigabitEthernet0/1');
+  if (device === 'br-r1' && iface === 'GigabitEthernet0/1') return !state.shutdownInterfaces.includes('br-sw1:FastEthernet0/1');
+  if (iface === 'GigabitEthernet0/0') return !state.shutdownInterfaces.includes(`${device === 'br-r1' ? 'hq-r1' : 'br-r1'}:GigabitEthernet0/0`);
+  return true;
+}
 
 function observe(state: SimState, observation: Observation): SimState {
   return { ...state, observations: [...new Set([...state.observations, observation])] };
@@ -90,7 +134,7 @@ export function normalizeCommand(command: string) {
 
 const interfaces: Record<DeviceId, string[]> = {
   'branch-pc': ['eth0'],
-  'br-sw1': ['FastEthernet0/1', 'FastEthernet0/3'],
+  'br-sw1': ['FastEthernet0/1', 'FastEthernet0/2', 'FastEthernet0/3'],
   'br-r1': ['GigabitEthernet0/0', 'GigabitEthernet0/1'],
   'hq-r1': ['GigabitEthernet0/0', 'GigabitEthernet0/1'],
 };
@@ -254,13 +298,16 @@ export function isVlanFixed(state: SimState) {
 }
 
 export function routeHealth(state: SimState) {
-  const accessVlanOk = isVlanFixed(state) && state.portModes['FastEthernet0/3'] === 'access';
-  const gatewayReachable = accessVlanOk && state.portModes['FastEthernet0/1'] === 'access' && state.portVlans['FastEthernet0/1'] === 20 && !['br-sw1:FastEthernet0/1', 'br-sw1:FastEthernet0/3', 'br-r1:GigabitEthernet0/1'].some((key) => state.shutdownInterfaces.includes(key));
+  const accessPort = state.cablePort && state.cablePort !== 'console' ? state.cablePort : 'FastEthernet0/3';
+  const accessVlanOk = state.portVlans[accessPort] === 20 && state.portModes[accessPort] === 'access';
+  const carrier = interfaceUp('branch-pc', 'eth0', state);
+  const gatewayReachable = carrier && accessVlanOk && state.portModes['FastEthernet0/1'] === 'access' && state.portVlans['FastEthernet0/1'] === 20 && interfaceUp('br-sw1', 'FastEthernet0/1', state);
   const ospfNeighborFull = !['br-r1:GigabitEthernet0/0', 'hq-r1:GigabitEthernet0/0'].some((key) => state.shutdownInterfaces.includes(key)) && ospfAreas(state.brOspfNetworks, '10.0.0.2').some((area) => ospfAreas(state.hqOspfNetworks, '10.0.0.1').includes(area));
-  const hqReturnRoute = ospfNeighborFull && hasBranchLanOspf(state) && !state.shutdownInterfaces.includes('br-r1:GigabitEthernet0/1');
+  const hqReturnRoute = ospfNeighborFull && hasBranchLanOspf(state) && interfaceUp('br-r1','GigabitEthernet0/1',state);
   const hqRoute = ospfNeighborFull && advertised(state.hqOspfNetworks, '10.10.10.1') && !state.shutdownInterfaces.includes('hq-r1:GigabitEthernet0/1');
   return {
     accessVlanOk,
+    carrier,
     gatewayReachable,
     branchLanAdvertised: hasBranchLanOspf(state),
     ospfNeighborFull,
@@ -284,13 +331,15 @@ export type TopologyLink = {
 export function topologyLinks(state: SimState): TopologyLink[] {
   const health = routeHealth(state);
   const up = (...keys: string[]) => keys.every((key) => !state.shutdownInterfaces.includes(key));
-  const accessUp = up('br-sw1:FastEthernet0/3');
+  const accessUp = health.carrier;
+  const port = state.cablePort;
+  const portName = port?.replace('FastEthernet', 'Fa') ?? 'Unplugged';
   const uplinkUp = up('br-sw1:FastEthernet0/1', 'br-r1:GigabitEthernet0/1');
   const uplinkVlanOk = state.portModes['FastEthernet0/1'] === 'access' && state.portVlans['FastEthernet0/1'] === 20;
   const wanUp = up('br-r1:GigabitEthernet0/0', 'hq-r1:GigabitEthernet0/0');
   const serverUp = up('hq-r1:GigabitEthernet0/1');
   return [
-    { id: 'access', from: 'Branch PC', to: 'BR-SW1', fromPort: 'eth0', toPort: 'Fa0/3', status: !accessUp ? 'down' : health.accessVlanOk ? 'up' : 'blocked', label: !accessUp ? 'Port down' : health.accessVlanOk ? 'VLAN 20' : 'VLAN mismatch', detail: !accessUp ? 'Fa0/3 is shut down' : health.accessVlanOk ? 'Access port / VLAN 20' : `Fa0/3: ${state.portModes['FastEthernet0/3']}, VLAN ${state.branchAccessVlan}; expected access VLAN 20` },
+    { id: 'access', from: 'Branch PC', to: 'BR-SW1', fromPort: 'eth0', toPort: portName, status: !accessUp ? 'down' : health.accessVlanOk ? 'up' : 'blocked', label: !accessUp ? 'No carrier' : health.accessVlanOk ? 'VLAN 20' : 'VLAN mismatch', detail: port === null ? 'PP-03 patch lead is disconnected' : port === 'console' ? 'PP-03 is connected to a serial console port, not Ethernet' : !accessUp ? `${portName} is shut down` : health.accessVlanOk ? 'Access port / VLAN 20' : `${portName}: ${state.portModes[port]}, VLAN ${state.portVlans[port]}; expected access VLAN 20` },
     { id: 'uplink', from: 'BR-SW1', to: 'BR-R1', fromPort: 'Fa0/1', toPort: 'Gi0/1', status: !uplinkUp ? 'down' : uplinkVlanOk ? 'up' : 'blocked', label: !uplinkUp ? 'Port down' : uplinkVlanOk ? 'Branch LAN' : 'VLAN mismatch', detail: !uplinkUp ? 'A branch uplink interface is shut down' : uplinkVlanOk ? '192.168.20.0/24' : `Fa0/1: ${state.portModes['FastEthernet0/1']}, VLAN ${state.portVlans['FastEthernet0/1']}; expected access VLAN 20` },
     { id: 'wan', from: 'BR-R1', to: 'HQ-R1', fromPort: 'Gi0/0', toPort: 'Gi0/0', status: !wanUp ? 'down' : health.ospfNeighborFull ? 'up' : 'blocked', label: !wanUp ? 'WAN down' : health.ospfNeighborFull ? 'OSPF FULL' : 'OSPF down', detail: !wanUp ? 'A WAN interface is shut down' : health.ospfNeighborFull ? '10.0.0.0/30' : 'Link up; no OSPF adjacency' },
     { id: 'server', from: 'HQ-R1', to: 'HQ Server', fromPort: 'Gi0/1', toPort: 'eth0', status: serverUp ? 'up' : 'down', label: serverUp ? 'HQ LAN' : 'Port down', detail: serverUp ? '10.10.10.0/24' : 'HQ-R1 Gi0/1 is shut down' },
@@ -339,6 +388,7 @@ function runningConfig(device: DeviceId, state: SimState) {
 }
 
 export function configurationDiff(state: SimState) {
+  const baseline = initialMissionState(state.missionId);
   const result: string[] = [];
   const compare = (context: string, before: string[], after: string[]) => {
     const removed = before.filter((line) => !after.includes(line)).map((line) => '- ' + line.trim());
@@ -346,12 +396,13 @@ export function configurationDiff(state: SimState) {
     if (removed.length || added.length) result.push(context, ...removed, ...added, '');
   };
   for (const device of ['br-sw1', 'br-r1', 'hq-r1'] as DeviceId[]) {
-    for (const iface of interfaces[device]) compare(`${deviceLabels[device]} / ${iface}`, interfaceConfig(device, iface, initialState).split('\n'), interfaceConfig(device, iface, state).split('\n'));
+    for (const iface of interfaces[device]) compare(`${deviceLabels[device]} / ${iface}`, interfaceConfig(device, iface, baseline).split('\n'), interfaceConfig(device, iface, state).split('\n'));
     if (device !== 'br-sw1') {
       const key = device === 'br-r1' ? 'brOspfNetworks' : 'hqOspfNetworks';
-      compare(`${deviceLabels[device]} / router ospf 1`, initialState[key].map((line) => 'network ' + line), state[key].map((line) => 'network ' + line));
+      compare(`${deviceLabels[device]} / router ospf 1`, baseline[key].map((line) => 'network ' + line), state[key].map((line) => 'network ' + line));
     }
   }
+  if (state.cablePort !== baseline.cablePort) result.push('Physical patch / PP-03', `- ${baseline.cablePort ?? 'disconnected'}`, `+ ${state.cablePort ?? 'disconnected'}`);
   return result.join('\n').trimEnd() || '# No configuration changes';
 }
 
@@ -360,7 +411,7 @@ function routeTable(device: DeviceId, state: SimState) {
   const health = routeHealth(state);
   const routes = ['Codes: C - connected, L - local, O - OSPF', '', 'Gateway of last resort is not set', ''];
   for (const iface of interfaces[device]) {
-    if (state.shutdownInterfaces.includes(`${device}:${iface}`)) continue;
+    if (!interfaceUp(device,iface,state)) continue;
     const ip = addresses[`${device}:${iface}`];
     const network = ip.slice(0, ip.lastIndexOf('.')) + '.0';
     routes.push(`C    ${network}/${iface.endsWith('0/0') ? '30' : '24'} is directly connected, ${iface}`);
@@ -374,7 +425,8 @@ function routeTable(device: DeviceId, state: SimState) {
 function ipInterfaceBrief(device: DeviceId, state: SimState) {
   return ['Interface              IP-Address      OK? Method Status                Protocol', ...interfaces[device].map((iface) => {
     const down = state.shutdownInterfaces.includes(`${device}:${iface}`);
-    return `${iface.padEnd(23)}${(addresses[`${device}:${iface}`] ?? 'unassigned').padEnd(16)}YES manual ${(down ? 'administratively down' : 'up').padEnd(22)}${down ? 'down' : 'up'}`;
+    const up = interfaceUp(device, iface, state);
+    return `${iface.padEnd(23)}${(addresses[`${device}:${iface}`] ?? 'unassigned').padEnd(16)}YES manual ${(down ? 'administratively down' : up ? 'up' : 'down').padEnd(22)}${up ? 'up' : 'down'}`;
   })].join('\n');
 }
 
@@ -398,8 +450,9 @@ function ospfProtocols(device: DeviceId, state: SimState) {
 
 function interfaceDetails(device: DeviceId, iface: string, state: SimState, switchport = false) {
   const down = state.shutdownInterfaces.includes(`${device}:${iface}`);
-  if (switchport) return [`Name: ${iface.replace('FastEthernet', 'Fa')}`, 'Switchport: Enabled', `Administrative Mode: static ${state.portModes[iface]}`, `Operational Mode: ${down ? 'down' : 'static ' + state.portModes[iface]}`, `Access Mode VLAN: ${state.portVlans[iface]} (${vlanName(state.portVlans[iface])})`, 'Voice VLAN: none'].join('\n');
-  return [`${iface} is ${down ? 'administratively down' : 'up'}, line protocol is ${down ? 'down' : 'up'}`, `  Hardware is ${device === 'br-sw1' ? 'Fast Ethernet' : 'Gigabit Ethernet'}`, ...(addresses[`${device}:${iface}`] ? [`  Internet address is ${addresses[`${device}:${iface}`]}/${iface.endsWith('0/0') ? 30 : 24}`] : []), '  MTU 1500 bytes, reliability 255/255', '  0 input errors, 0 CRC, 0 frame', '  0 output errors, 0 collisions'].join('\n');
+  const up = interfaceUp(device, iface, state);
+  if (switchport) return [`Name: ${iface.replace('FastEthernet', 'Fa')}`, 'Switchport: Enabled', `Administrative Mode: static ${state.portModes[iface]}`, `Operational Mode: ${up ? 'static ' + state.portModes[iface] : 'down'}`, `Access Mode VLAN: ${state.portVlans[iface]} (${vlanName(state.portVlans[iface])})`, 'Voice VLAN: none'].join('\n');
+  return [`${iface} is ${down ? 'administratively down' : up ? 'up' : 'down'}, line protocol is ${up ? 'up' : 'down'}`, `  Hardware is ${device === 'br-sw1' ? 'Fast Ethernet' : 'Gigabit Ethernet'}`, ...(addresses[`${device}:${iface}`] ? [`  Internet address is ${addresses[`${device}:${iface}`]}/${iface.endsWith('0/0') ? 30 : 24}`] : []), '  MTU 1500 bytes, reliability 255/255', '  0 input errors, 0 CRC, 0 frame', '  0 output errors, 0 collisions'].join('\n');
 }
 
 
@@ -441,7 +494,7 @@ function runPcCommand(command: string, state: SimState): CommandResult {
     return {
       state: observe(state, 'pc-address'),
       output:
-        '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n    inet 192.168.20.45/24 brd 192.168.20.255 scope global eth0\n    ether 00:50:56:ad:20:45',
+        `2: eth0: <BROADCAST,MULTICAST,UP,${routeHealth(state).carrier ? 'LOWER_UP' : 'NO-CARRIER'}> mtu 1500 state ${routeHealth(state).carrier ? 'UP' : 'DOWN'}\n    inet 192.168.20.45/24 brd 192.168.20.255 scope global eth0\n    ether 00:50:56:ad:20:45`,
     };
   }
   if (cmd === 'ip route' || cmd === 'route -n') {
@@ -516,7 +569,7 @@ export function runCommand(device: DeviceId, command: string, state: SimState, m
     let output = '';
     if (action === 'show running-config') output = runningConfig(device, state);
     else if (action === 'show running-config interface <interface>') output = interfaceConfig(device, words[3], state) + '\nend';
-    else if (action === 'show startup-config') output = state.startupConfigs[device] ?? runningConfig(device, initialState);
+    else if (action === 'show startup-config') output = state.startupConfigs[device] ?? runningConfig(device, initialMissionState(state.missionId));
     else if (action === 'show ip interface brief') output = ipInterfaceBrief(device, state);
     else if (action === 'show ip ospf neighbor') output = ospfNeighbor(device, state);
     else if (action === 'show ip protocols') output = ospfProtocols(device, state);
@@ -525,7 +578,7 @@ export function runCommand(device: DeviceId, command: string, state: SimState, m
       if (words[3]) output = output.split('\n').filter((line) => line.startsWith(words[3] === 'ospf' ? 'O ' : 'C ')).join('\n');
     } else if (action === 'show vlan' || action === 'show vlan brief') output = vlanBrief(state);
     else if (action === 'show interfaces <interface> switchport') output = interfaceDetails(device, words[2], state, true);
-    else if (action === 'show interfaces status') output = ['Port      Name               Status       Vlan       Duplex Speed Type', ...interfaces[device].map((iface) => `${iface.replace('FastEthernet', 'Fa').padEnd(10)}${(state.descriptions[`${device}:${iface}`] ?? '').slice(0, 18).padEnd(19)}${(state.shutdownInterfaces.includes(`${device}:${iface}`) ? 'disabled' : 'connected').padEnd(13)}${String(state.portModes[iface] === 'trunk' ? 'trunk' : state.portVlans[iface]).padEnd(11)}a-full a-100 10/100BaseTX`)].join('\n');
+    else if (action === 'show interfaces status') output = ['Port      Name               Status       Vlan       Duplex Speed Type', ...interfaces[device].map((iface) => `${iface.replace('FastEthernet', 'Fa').padEnd(10)}${(state.descriptions[`${device}:${iface}`] ?? '').slice(0, 18).padEnd(19)}${(state.shutdownInterfaces.includes(`${device}:${iface}`) ? 'disabled' : interfaceUp(device, iface, state) ? 'connected' : 'notconnect').padEnd(13)}${String(state.portModes[iface] === 'trunk' ? 'trunk' : state.portVlans[iface]).padEnd(11)}a-full a-100 10/100BaseTX`)].join('\n');
     else if (action === 'show interfaces trunk') output = ['Port      Mode         Encapsulation  Status        Native vlan', ...interfaces[device].filter((iface) => state.portModes[iface] === 'trunk' && !state.shutdownInterfaces.includes(`${device}:${iface}`)).map((iface) => `${iface.replace('FastEthernet', 'Fa')}     on           802.1q         trunking      1`)].join('\n');
     else if (action === 'show interfaces <interface>' || action === 'show ip interface <interface>') output = interfaceDetails(device, words.at(-1)!, state);
     else if (action === 'show interfaces' || action === 'show ip interface') output = interfaces[device].map((iface) => interfaceDetails(device, iface, state)).join('\n\n');

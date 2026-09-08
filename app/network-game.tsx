@@ -11,6 +11,10 @@ import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
 import { createNetworkRoom } from './room-scene';
 import { TopologyView } from './topology-view';
 import { guidanceCommands, missionGuidance } from './mission-guidance';
+import { CableWorkbench } from './cable-workbench';
+import { useLabProgress } from './use-lab-progress';
+import { newMissionProgress } from './lab-progress';
+import type { MissionProgress, Sessions } from './lab-progress';
 import {
   ArrowDown,
   ArrowLeft,
@@ -32,16 +36,25 @@ import {
   RotateCcw,
   Server,
   Terminal,
+  ListChecks,
+  Save,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { AlertDialog, AlertDialogContent, AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel, AlertDialogFooter } from '@/components/ui/alert-dialog';
 
-import { deviceLabels, initialState, starterHistory, isRouter, routeHealth, promptFor, runCommand, commandHelp, completeCommand, configurationDiff } from './network-simulator';
-import type { DeviceId, TerminalMode, SimState, TerminalEntry } from './network-simulator';
+import { deviceLabels, initialMissionState, starterHistory, missions, missionComplete, isRouter, routeHealth, promptFor, runCommand, commandHelp, completeCommand, configurationDiff } from './network-simulator';
+import type { DeviceId, MissionId, SimState } from './network-simulator';
 
 function mastery(state: SimState) {
   const health = routeHealth(state);
+  if (state.missionId === 'cabling') return [
+    {topic: 'Physical inspection', value: state.observations.includes('physical-port') ? 100 : 0},
+    {topic: 'Assigned Ethernet link', value: state.cablePort === 'FastEthernet0/3' && health.carrier ? 100 : 0},
+    {topic: 'End-to-end verification', value: missionComplete(state) ? 100 : 0},
+  ];
   return [
     {
       topic: 'Subnetting',
@@ -86,10 +99,12 @@ function explainFix(state: SimState) {
 function NetworkRoom({
   consoleOpen,
   onOpenConsole,
+  onInspect,
   state,
 }: {
   consoleOpen: boolean;
   onOpenConsole: () => void;
+  onInspect: () => void;
   state: SimState;
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
@@ -130,7 +145,7 @@ function NetworkRoom({
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.12;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.info.autoReset = false;
     mount.appendChild(renderer.domElement);
     const room = createNetworkRoom(scene, renderer);
@@ -179,9 +194,11 @@ function NetworkRoom({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (statusRef.current.consoleOpen) return;
+      if ((event.target as HTMLElement).closest('button, input, select, textarea')) return;
       keys.add(event.key.toLowerCase());
       const flatDistance = Math.hypot(camera.position.x - consoleTarget.x, camera.position.z - consoleTarget.z);
       if (event.key.toLowerCase() === 'e' && flatDistance < 2.35) onOpenConsole();
+      else if (event.key.toLowerCase() === 'e' && Math.hypot(camera.position.x + 3.55, camera.position.z + 0.56) < 2.4) onInspect();
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
@@ -209,7 +226,12 @@ function NetworkRoom({
     const onTouchEnd = () => { touchLook = null; };
 
     const onCanvasClick = (event: PointerEvent) => {
-      if (!statusRef.current.consoleOpen && event.pointerType !== 'touch') {
+      if (statusRef.current.consoleOpen) return;
+      const rect=renderer.domElement.getBoundingClientRect();
+      const ray=new THREE.Raycaster();
+      ray.setFromCamera(document.pointerLockElement ? new THREE.Vector2() : new THREE.Vector2((event.clientX-rect.left)/rect.width*2-1,-(event.clientY-rect.top)/rect.height*2+1),camera);
+      if (room.hitStation(ray)) { onInspect(); return; }
+      if (event.pointerType !== 'touch') {
         renderer.domElement.requestPointerLock?.()?.catch(() => undefined);
       }
     };
@@ -270,9 +292,9 @@ function NetworkRoom({
       const flatDistance = Math.hypot(camera.position.x - consoleTarget.x, camera.position.z - consoleTarget.z);
       setNearConsole(flatDistance < 2.35);
 
-      room.update(health, elapsed);
+      room.update(health, elapsed, activeState);
       renderer.info.reset();
-      composer.render();
+      if (!statusRef.current.consoleOpen) composer.render();
       mount.dataset.drawCalls = String(renderer.info.render.calls);
       frameId = requestAnimationFrame(animate);
     };
@@ -300,10 +322,10 @@ function NetworkRoom({
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, [onOpenConsole]);
+  }, [onOpenConsole, onInspect]);
 
   return (
-    <section className="room-stage" aria-label="Explorable 3D network operations room">
+    <section className="room-stage" aria-label="Explorable 3D network operations room" inert={consoleOpen}>
       <div ref={mountRef} className="room-canvas" />
 
       <div className="hud-top">
@@ -311,7 +333,7 @@ function NetworkRoom({
           <Network aria-hidden="true" />
           <div>
             <p>NetOps Lab</p>
-            <span>Mission NOC-1047</span>
+            <span>Mission {missions[state.missionId].ticket}</span>
           </div>
         </div>
         <div className="hud-pill">
@@ -321,10 +343,10 @@ function NetworkRoom({
       </div>
 
       {!consoleOpen && !pointerLocked && !nearConsole ? <div className="room-assignment">
-        <span className="eyebrow">{state.verifiedBranchToHq ? 'Assignment complete' : 'Your first assignment'}</span>
-        <h1>{state.verifiedBranchToHq ? 'Branch back online' : 'A branch has gone offline.'}</h1>
-        <p>{state.verifiedBranchToHq ? 'Local access restored. Return route learned. End-to-end test passed.' : 'One workstation. Two network faults. Restore the connection to HQ.'}</p>
-        <div><span className="assignment-dot" />{state.verifiedBranchToHq ? 'NOC-1047 resolved' : 'NOC-1047 / awaiting investigation'}</div>
+        <span className="eyebrow">{missionComplete(state) ? 'Assignment complete' : 'Active assignment'}</span>
+        <h1>{missionComplete(state) ? 'Branch back online' : missions[state.missionId].title}</h1>
+        <p>{missionComplete(state) ? 'The physical path and end-to-end connectivity have been verified.' : missions[state.missionId].summary}</p>
+        <div><span className="assignment-dot" />{missions[state.missionId].ticket} / {missionComplete(state) ? 'resolved' : 'awaiting investigation'}</div>
       </div> : null}
 
       <div className="hud-bottom">
@@ -335,10 +357,10 @@ function NetworkRoom({
           <span>Mouse look</span>
           <span>E at console</span>
         </div>
-        <Button className="console-button" size="lg" onClick={onOpenConsole}>
+        <div className="room-actions"><Button variant="secondary" size="lg" onClick={onInspect}><Cable/>Inspect BR-SW1</Button><Button className="console-button" size="lg" onClick={onOpenConsole}>
           <Terminal aria-hidden="true" />
           Open Console
-        </Button>
+        </Button></div>
       </div>
 
       <div className="touch-controls" aria-label="Movement controls">
@@ -425,25 +447,12 @@ function SubnetPanel({
       <p className="subnet-note">
         {routeHealth(state).gatewayReachable
           ? 'The PC and its gateway share the VLAN 20 broadcast domain. Traffic to other subnets can now reach the router.'
-          : `The PC address is valid. Check Fa0/3 (VLAN ${state.branchAccessVlan}), the uplink VLAN, and interface status to reach 192.168.20.1.`}
+          : !routeHealth(state).carrier ? 'The PC address is valid, but eth0 has no Ethernet carrier. Trace its patch lead before changing the IP configuration.' : `The PC address is valid. Check the workstation port, the uplink VLAN, and interface status to reach 192.168.20.1.`}
       </p>
     </div>
   );
 }
 
-
-type TerminalSession = {
-  mode: TerminalMode;
-  currentInterface: string | null;
-  command: string;
-  history: TerminalEntry[];
-  recalled: number | null;
-  draft: string;
-};
-type Sessions = Record<DeviceId, TerminalSession>;
-function newSessions(): Sessions {
-  return Object.fromEntries(Object.keys(deviceLabels).map((id) => [id, { mode: 'exec', currentInterface: null, command: '', history: [...starterHistory], recalled: null, draft: '' }])) as Sessions;
-}
 
 function TerminalPanel({ activeDevice, setActiveDevice, state, setState, sessions, setSessions }: {
   activeDevice: DeviceId;
@@ -457,7 +466,7 @@ function TerminalPanel({ activeDevice, setActiveDevice, state, setState, session
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const prompt = promptFor(activeDevice, session.mode);
-  const patchSession = (patch: Partial<TerminalSession>) => setSessions((current) => ({ ...current, [activeDevice]: { ...current[activeDevice], ...patch } }));
+  const patchSession = (patch: Partial<Sessions[DeviceId]>) => setSessions((current) => ({ ...current, [activeDevice]: { ...current[activeDevice], ...patch } }));
 
   useEffect(() => { inputRef.current?.focus({ preventScroll: true }); }, [activeDevice]);
   useEffect(() => {
@@ -542,9 +551,14 @@ function TerminalPanel({ activeDevice, setActiveDevice, state, setState, session
   );
 }
 
-function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void }) {
+function MissionPanel({ state, onReset, onInspect }: { state: SimState; onReset: () => void; onInspect: () => void }) {
   const health = routeHealth(state);
-  const objectiveItems = [
+  const objectiveItems = state.missionId === 'cabling' ? [
+    {text:'Inspect the BR-SW1 patch bay',done:state.observations.includes('physical-port')},
+    {text:'Patch PP-03 to assigned port Fa0/3',done:state.cablePort==='FastEthernet0/3'},
+    {text:'Restore Ethernet carrier',done:health.carrier},
+    {text:'Verify Branch PC to 10.10.10.10',done:state.verifiedBranchToHq},
+  ] : [
     { text: 'Inspect the workstation VLAN', done: state.observations.includes('access-vlan') },
     { text: 'Restore local gateway access', done: health.gatewayReachable },
     { text: 'Restore the OSPF return route', done: health.hqReturnRoute },
@@ -556,7 +570,7 @@ function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void
       <div className="ticket-heading">
         <div>
           <span className="eyebrow">Active Ticket</span>
-          <h1>Bring the Branch Office Online</h1>
+          <h1>{missions[state.missionId].title}</h1>
         </div>
         <Button variant="secondary" size="icon" onClick={onReset} aria-label="Reset mission">
           <RotateCcw aria-hidden="true" />
@@ -564,8 +578,7 @@ function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void
       </div>
 
       <p className="ticket-copy">
-        Branch users cannot reach the HQ intranet. Diagnose the path, fix the switching and routing faults,
-        then prove the service is reachable from the Branch PC.
+        {missions[state.missionId].summary}
       </p>
 
       <div className="objective-list">
@@ -576,32 +589,32 @@ function MissionPanel({ state, onReset }: { state: SimState; onReset: () => void
           </div>
         ))}
       </div>
+      <Button className="mission-inspect" variant="secondary" onClick={onInspect}><Cable/>Inspect BR-SW1</Button>
 
-      {state.verifiedBranchToHq && health.endToEnd ? <div className="mentor-box">
+      {missionComplete(state) ? <div className="mentor-box">
         <CircleHelp aria-hidden="true" />
-        <p>{explainFix(state)}</p>
+        <p>{state.missionId==='cabling'?'The RJ-45 console port carries serial management data, not Ethernet. The patch lead now reaches the assigned access port, and the workstation can exchange traffic with HQ.':explainFix(state)}</p>
       </div> : null}
     </aside>
   );
 }
 
-function FieldGuide({ state, sessions, activeDevice, onSelectDevice }: { state: SimState; sessions: Sessions; activeDevice: DeviceId; onSelectDevice: (device: DeviceId) => void }) {
+function FieldGuide({ state, sessions, activeDevice, onSelectDevice, revealed, setRevealed, onInspect }: { state: SimState; sessions: Sessions; activeDevice: DeviceId; onSelectDevice: (device: DeviceId) => void; revealed:Record<string,number>;setRevealed:(value:Record<string,number>)=>void;onInspect:()=>void }) {
   const guide = missionGuidance(state, routeHealth(state));
-  const [revealed, setRevealed] = useState<Record<string, number>>({});
   const level = revealed[guide.id] ?? 0;
   const complete = guide.id === 'complete';
   const guideRef = useRef<HTMLElement | null>(null);
   useEffect(() => { guideRef.current?.parentElement?.scrollTo({top: 0}); }, [guide.id]);
   return <section ref={guideRef} className={`field-guide ${complete ? 'guide-complete' : ''}`} aria-labelledby="guide-title" data-guide-stage={guide.id}>
-    <div className="guide-heading"><BookOpen aria-hidden="true" /><span>{complete ? 'Mission debrief' : 'Field guide'}</span><span>{guide.step} / 7</span></div>
+    <div className="guide-heading"><BookOpen aria-hidden="true" /><span>{complete ? 'Mission debrief' : 'Field guide'}</span><span>{guide.step} / {guide.total??7}</span></div>
     <h2 id="guide-title">{guide.title}</h2>
     <p>{guide.objective}</p>
-    <div className="guide-progress" aria-hidden="true">{Array.from({length: 7}, (_, i) => <i key={i} className={i < guide.step ? 'filled' : ''} />)}</div>
+    <div className="guide-progress" aria-hidden="true">{Array.from({length: guide.total??7}, (_, i) => <i key={i} className={i < guide.step ? 'filled' : ''} />)}</div>
     {complete ? <p className="guide-clue">{guide.clue}</p> : <>
-      <Button variant="secondary" onClick={() => onSelectDevice(guide.device)} className="guide-connect"><Terminal aria-hidden="true" />{activeDevice === guide.device ? `Focus ${deviceLabels[guide.device]}` : `Connect to ${deviceLabels[guide.device]}`}<ArrowRight aria-hidden="true" /></Button>
+      <Button variant="secondary" onClick={() => guide.physical?onInspect():onSelectDevice(guide.device)} className="guide-connect">{guide.physical?<Cable/>:<Terminal aria-hidden="true" />}{guide.physical?'Inspect BR-SW1':activeDevice === guide.device ? `Focus ${deviceLabels[guide.device]}` : `Connect to ${deviceLabels[guide.device]}`}<ArrowRight aria-hidden="true" /></Button>
       {level >= 1 ? <p className="guide-clue">{guide.clue}</p> : null}
       {level >= 2 ? <div className="guide-example"><span>Command reference / {deviceLabels[guide.device]}</span><pre>{guidanceCommands(guide, sessions[guide.device].mode).join('\n')}</pre><p>{guide.expected}</p></div> : null}
-      {level < 2 ? <button type="button" className="guide-hint" onClick={() => setRevealed((current) => ({...current, [guide.id]: level + 1}))}><CircleHelp aria-hidden="true" />{level === 0 ? 'Give me a clue' : 'Show command reference'}<ChevronRight aria-hidden="true" /></button> : null}
+      {level < (guide.physical?1:2) ? <button type="button" className="guide-hint" onClick={() => setRevealed({...revealed, [guide.id]: level + 1})}><CircleHelp aria-hidden="true" />{level === 0 ? 'Give me a clue' : 'Show command reference'}<ChevronRight aria-hidden="true" /></button> : null}
     </>}
   </section>;
 }
@@ -627,7 +640,7 @@ function DiffPanel({ state }: { state: SimState }) {
 function MasteryPanel({ state }: { state: SimState }) {
   const values = mastery(state);
   const lowest = values.reduce((weak, item) => (item.value < weak.value ? item : weak), values[0]);
-  const complete = routeHealth(state).endToEnd && state.verifiedBranchToHq;
+  const complete = missionComplete(state);
 
   return (
     <div className="mastery-panel">
@@ -664,16 +677,23 @@ function ConsoleOverlay({
   onClose,
   state,
   setState,
+  progress,
+  onProgress,
+  onReset,
+  onInspect,
 }: {
   open: boolean;
   onClose: () => void;
   state: SimState;
   setState: Dispatch<SetStateAction<SimState>>;
+  progress:MissionProgress;
+  onProgress:(update:(current:MissionProgress)=>MissionProgress)=>void;
+  onReset:()=>void;
+  onInspect:()=>void;
 }) {
-  const [activeDevice, setActiveDevice] = useState<DeviceId>('branch-pc');
-  const [sessions, setSessions] = useState<Sessions>(newSessions);
-  const [guided, setGuided] = useState(true);
-  const [guideRun, setGuideRun] = useState(0);
+  const {activeDevice,sessions,guided}=progress;
+  const setActiveDevice=(id:DeviceId)=>onProgress(p=>({...p,activeDevice:id}));
+  const setSessions:Dispatch<SetStateAction<Sessions>>=(action)=>onProgress(p=>({...p,sessions:typeof action==='function'?action(p.sessions):action}));
   const selectDevice = (device: DeviceId) => {
     setActiveDevice(device);
     requestAnimationFrame(() => {
@@ -694,9 +714,9 @@ function ConsoleOverlay({
         <header className="console-header">
           <div>
             <span className="eyebrow">Topology Console</span>
-            <h2>Branch to HQ Recovery Lab</h2>
+            <h2>{missions[state.missionId].title}</h2>
           </div>
-          <div className="console-header-actions"><label className="guide-toggle"><input type="checkbox" checked={guided} onChange={(event) => setGuided(event.target.checked)} />Guided practice</label><Button variant="secondary" onClick={onClose}>
+          <div className="console-header-actions"><label className="guide-toggle"><input type="checkbox" checked={guided} onChange={(event) => {const checked=event.target.checked;onProgress(p=>({...p,guided:checked}));}} />Guided practice</label><Button variant="secondary" onClick={onClose}>
             Return to Room
           </Button></div>
         </header>
@@ -706,12 +726,8 @@ function ConsoleOverlay({
           <div className="console-left">
             <MissionPanel
               state={state}
-              onReset={() => {
-                setState(initialState);
-                setActiveDevice('branch-pc');
-                setSessions(newSessions());
-                setGuideRun((current) => current + 1);
-              }}
+              onReset={onReset}
+              onInspect={onInspect}
             />
             <SubnetPanel state={state} onViewed={handleViewedSubnet} />
           </div>
@@ -728,7 +744,7 @@ function ConsoleOverlay({
           </div>
 
           <div className="console-right">
-            {guided ? <FieldGuide key={guideRun} state={state} sessions={sessions} activeDevice={activeDevice} onSelectDevice={selectDevice} /> : null}
+            {guided ? <FieldGuide state={state} sessions={sessions} activeDevice={activeDevice} onSelectDevice={selectDevice} revealed={progress.hints} setRevealed={(hints)=>onProgress(p=>({...p,hints}))} onInspect={onInspect}/> : null}
             <DiffPanel state={state} />
             <MasteryPanel state={state} />
           </div>
@@ -739,21 +755,32 @@ function ConsoleOverlay({
 }
 
 export default function NetworkGame() {
-  const [consoleOpen, setConsoleOpen] = useState(false);
-  const [state, setState] = useState<SimState>(initialState);
+  const {progress,setProgress,loaded,saveStatus,error,retryLoad}=useLabProgress();
+  const [view,setView]=useState<'room'|'console'|'cabling'>('room');
+  const [menuOpen,setMenuOpen]=useState(false);
+  const [resetOpen,setResetOpen]=useState(false);
+  const active=progress.missions[progress.activeMission];
+  const state=active.state;
+  const onProgress=useCallback((update:(current:MissionProgress)=>MissionProgress)=>setProgress(p=>({...p,missions:{...p.missions,[p.activeMission]:update(p.missions[p.activeMission])}})),[setProgress]);
+  const setState=useCallback<Dispatch<SetStateAction<SimState>>>((action)=>onProgress(p=>({...p,started:true,state:typeof action==='function'?action(p.state):action})),[onProgress]);
   const health = useMemo(() => routeHealth(state), [state]);
   const openConsole = useCallback(() => {
     if (document.pointerLockElement) document.exitPointerLock();
-    setConsoleOpen(true);
+    setView('console');
   }, []);
+  const inspect=useCallback(()=>{if(document.pointerLockElement)document.exitPointerLock();setState(s=>({...s,observations:[...new Set([...s.observations,'physical-port' as const])]}));setView('cabling');},[setState]);
+  const selectMission=(id:MissionId)=>{setProgress(p=>({...p,activeMission:id,missions:{...p.missions,[id]:{...p.missions[id],started:true}}}));setView('room');setMenuOpen(false);};
+  if(!loaded)return <main className="lab-loading"><Network/><h1>NetOps Lab</h1><p>{error||'Restoring your lab checkpoint...'}</p>{error?<Button onClick={()=>void retryLoad()}>Retry loading</Button>:null}</main>;
 
   return (
     <main className="game-root">
-      <NetworkRoom consoleOpen={consoleOpen} onOpenConsole={openConsole} state={state} />
-      <div className="status-rail" aria-label="Mission status">
-        <div className={`rail-item ${health.accessVlanOk ? 'ok' : 'bad'}`}>
+      <NetworkRoom consoleOpen={view!=='room'||menuOpen||resetOpen} onOpenConsole={openConsole} onInspect={inspect} state={state} />
+      <div className={`lab-toolbar ${view!=='room'?'lab-toolbar-compact':''}`}>{view==='room'?<Button variant="secondary" onClick={()=>{if(document.pointerLockElement)document.exitPointerLock();setMenuOpen(true);}}><ListChecks/>Missions</Button>:null}<output><Save/>{saveStatus}</output></div>
+      {error?<div className="save-error" role="alert">{error} Your current session is still available; keep this page open.</div>:null}
+      {view==='room'?<div className="status-rail" aria-label="Mission status">
+        <div className={`rail-item ${(state.missionId==='cabling'?health.carrier:health.accessVlanOk) ? 'ok' : 'bad'}`}>
           <Cable aria-hidden="true" />
-          <span>Switching</span>
+          <span>{state.missionId==='cabling'?(health.carrier?'Carrier up':'No carrier'):'Switching'}</span>
         </div>
         <div className={`rail-item ${health.branchLanAdvertised ? 'ok' : 'bad'}`}>
           <Network aria-hidden="true" />
@@ -763,8 +790,11 @@ export default function NetworkGame() {
           <Server aria-hidden="true" />
           <span>Reachability</span>
         </div>
-      </div>
-      <ConsoleOverlay open={consoleOpen} onClose={() => setConsoleOpen(false)} state={state} setState={setState} />
+      </div>:null}
+      <ConsoleOverlay open={view==='console'} onClose={() => setView('room')} state={state} setState={setState} progress={active} onProgress={onProgress} onReset={()=>setResetOpen(true)} onInspect={inspect}/>
+      {view==='cabling'?<CableWorkbench state={state} onState={setState} onClose={()=>setView('room')} onConsole={openConsole}/>:null}
+      <Dialog open={menuOpen} onOpenChange={setMenuOpen}><DialogContent className="mission-menu"><DialogTitle>Assignments</DialogTitle><DialogDescription>Two tickets. Separate checkpoints. Progress is saved for this browser.</DialogDescription><div className="assignment-list">{(Object.keys(missions) as MissionId[]).map(id=><button type="button" key={id} onClick={()=>selectMission(id)}><span className="eyebrow">{missions[id].ticket} / {missionComplete(progress.missions[id].state)?'Complete':progress.missions[id].started?'In progress':'Available'}</span><strong>{missions[id].title}</strong><p>{missions[id].summary}</p><span>{missions[id].topics}</span><b>{progress.missions[id].started?'Resume':'Start mission'}<ArrowRight/></b></button>)}</div></DialogContent></Dialog>
+      <AlertDialog open={resetOpen} onOpenChange={setResetOpen}><AlertDialogContent><AlertDialogTitle>Restart this mission?</AlertDialogTitle><AlertDialogDescription>This replaces the current ticket&apos;s configuration, cable position, hints, and terminal history. The other mission is unchanged.</AlertDialogDescription><AlertDialogFooter><AlertDialogCancel>Keep progress</AlertDialogCancel><AlertDialogAction onClick={()=>{onProgress(()=>newMissionProgress(initialMissionState(progress.activeMission),progress.activeMission==='branch'?starterHistory:[]));setResetOpen(false);}}>Restart mission</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     </main>
   );
 }

@@ -21,7 +21,7 @@ export function TopologyView({ state, activeDevice, onSelectDevice }: { state: S
   const links = topologyLinks(state);
   const devices: { id: DeviceId | 'hq-server'; label: string; role: string; kind: keyof typeof deviceIcons; details: [string, string][] }[] = [
     { id: 'branch-pc', label: 'Branch PC', role: 'Workstation', kind: 'pc', details: [['IP', '192.168.20.45/24'], ['GW', '192.168.20.1']] },
-    { id: 'br-sw1', label: 'BR-SW1', role: 'Access switch', kind: 'switch', details: [['Fa0/3', `VLAN ${state.branchAccessVlan}`], ['Fa0/1', `VLAN ${state.portVlans['FastEthernet0/1']}`]] },
+    { id: 'br-sw1', label: 'BR-SW1', role: 'Access switch', kind: 'switch', details: [[state.cablePort?.replace('FastEthernet','Fa')??'PP-03', state.cablePort===null?'Unplugged':state.cablePort==='console'?'Serial only':`VLAN ${state.portVlans[state.cablePort]}`], ['Fa0/1', `VLAN ${state.portVlans['FastEthernet0/1']}`]] },
     { id: 'br-r1', label: 'BR-R1', role: 'Branch router', kind: 'router', details: [['LAN', '192.168.20.1'], ['WAN', '10.0.0.2']] },
     { id: 'hq-r1', label: 'HQ-R1', role: 'HQ router', kind: 'router', details: [['WAN', '10.0.0.1'], ['LAN', '10.10.10.1']] },
     { id: 'hq-server', label: 'HQ Server', role: 'Intranet', kind: 'server', details: [['IP', '10.10.10.10/24'], ['GW', '10.10.10.1']] },
