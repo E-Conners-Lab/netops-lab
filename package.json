@@ -1,6 +1,7 @@
 {
-  "name": "sites-project",
+  "name": "netops-lab",
   "version": "0.1.0",
+  "description": "A browser-based networking training game prototype with a 3D operations room and simulated CLI.",
   "private": true,
   "engines": {
     "node": ">=22.13.0"

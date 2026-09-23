@@ -1,4 +1,4 @@
-CREATE TABLE `lab_saves` (
+CREATE TABLE IF NOT EXISTS `lab_saves` (
 	`id` text PRIMARY KEY NOT NULL,
 	`progress` text,
 	`revision` integer DEFAULT 0 NOT NULL,

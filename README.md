@@ -2,6 +2,8 @@
 
 A browser-based networking training prototype built with React, Three.js, and Vinext. Explore a network operations room, inspect a physical patch bay, and troubleshoot through a live topology and typed device consoles.
 
+This is an educational simulator. It does not run commands on your computer or connect to physical network gear. Cisco and IOS are trademarks of Cisco Systems, Inc.; NetOps Lab is not affiliated with or endorsed by Cisco.
+
 ## Missions
 
 - **Bring the Branch Online:** repair an access VLAN and OSPF return-route fault.
@@ -29,6 +31,24 @@ npm run dev
 ```
 
 The default preview is http://localhost:3000. The local database stays in ignored `.wrangler/state`; it is separate from hosted player saves.
+
+## Run With Docker
+
+Docker is the supported download-and-launch option for this prototype. It runs the app locally at http://localhost:3000 and stores progress in a named Docker volume.
+
+```sh
+git clone https://github.com/E-Conners-Lab/netops-lab.git
+cd netops-lab
+docker compose up --build
+```
+
+Use `Ctrl+C` to stop it. Start it again with `docker compose up`; existing progress remains. To remove the app and its local save data, run:
+
+```sh
+docker compose down --volumes
+```
+
+The container runs as an unprivileged user, exposes only port `3000`, and has no credentials or external service configuration. Review `SECURITY.md` before sharing Docker data volumes.
 
 ## Checkpoints
 
@@ -60,3 +80,7 @@ The repository-wide lint command also checks the bundled UI component library, w
 - Additional 3D physical tasks and low-end graphics settings.
 
 These are roadmap candidates, not implemented features.
+
+## License
+
+Released under the [MIT License](LICENSE).

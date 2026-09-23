@@ -1,0 +1,13 @@
+.git
+.github
+.wrangler
+dist
+node_modules
+coverage
+qa
+work
+outputs
+.env*
+.DS_Store
+npm-debug.log*
+
