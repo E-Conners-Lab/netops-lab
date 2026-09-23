@@ -23,3 +23,4 @@ jobs:
       - run: npx tsc --noEmit --incremental false
       - run: npx oxlint app db drizzle.config.ts tests
       - run: npm run build
+      - run: docker build --tag netops-lab:ci .
