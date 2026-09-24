@@ -61,7 +61,7 @@ Database schema is in `db/schema.ts`; generated SQL migrations are committed und
 ```sh
 npm test
 npx tsc --noEmit --incremental false
-npx oxlint app db drizzle.config.ts tests
+npx oxlint app db tests
 ```
 
 With the local server running, include the save API integration test:
